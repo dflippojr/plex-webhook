@@ -1,0 +1,9 @@
+services:
+  plex-webhook:
+    build: .
+    container_name: plex-webhook
+    restart: always
+    ports:
+      - "127.0.0.1:9800:8000"
+    volumes:
+      - ./data:/data
