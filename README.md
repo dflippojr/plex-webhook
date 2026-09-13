@@ -1,8 +1,7 @@
 # plex-webhook
 
-Phase 1 of the Plex webhook event pipeline: a minimal FastAPI receiver that
-captures raw Plex Pass webhook events (play/pause/stop/rate/etc.) to a
-JSONL log for later processing.
+A Plex Pass webhook receiver that captures play/pause/stop/rate events and
+can dim/restore lights per room based on which Plex client is playing.
 
 ## Run
 
@@ -23,18 +22,79 @@ http://127.0.0.1:9800/webhook
 
 (Requires Plex Pass, confirmed active on this account.)
 
-## Output
+## Endpoints
 
-Raw events are appended as JSON lines to `./data/events.jsonl`, one per
-webhook delivery: `received_at`, `event` type, full decoded `payload`, and
-any attachment metadata (e.g. thumbnail) that came with the multipart
-request.
+- `POST /webhook` — Plex webhook target.
+- `GET /health` — liveness check.
+- `GET /metrics` — Prometheus metrics.
+- `GET /clients` — every distinct Plex client (`title` + `uuid`) seen in
+  captured events, with event count and last-seen time. Use this to find
+  the exact identifiers to put in `config/rooms.yaml`.
+- `GET /rooms` — the currently loaded room config.
+- `POST /rooms/reload` — reload `config/rooms.yaml` without restarting the
+  container (edits to the file otherwise only take effect on restart).
 
-## Next phases (see project backlog)
+## Phase 1 — raw event capture
 
-- Phase 2: promote `events.jsonl` into SQLite + a Prometheus exporter +
-  Grafana dashboard (alongside the existing `observability-stack`).
-- Phase 3 (deferred): smart-home dispatcher reacting to events (e.g. dim
-  lights on play) — direction still needs picking per-brand local APIs
-  (Govee LAN control, Tuya local-key for Gosund-style devices) since
-  Google Home has no webhook/automation path.
+Every webhook delivery is appended as a JSON line to `./data/events.jsonl`:
+`received_at`, `event` type, full decoded `payload`, and any attachment
+metadata (e.g. thumbnail).
+
+## Phase 2 — structured storage + metrics
+
+Events are also parsed into `./data/plex_events.db` (SQLite, `events`
+table) and exposed as Prometheus metrics (`plex_webhook_events_total`,
+`plex_webhook_last_event_timestamp_seconds`), scraped by the existing
+`observability-stack` Prometheus and shown on the "Plex Webhook" Grafana
+dashboard in the "Basement PC" folder.
+
+## Phase 3 — room-based light dispatcher
+
+`config/rooms.yaml` manually maps each room to the Plex clients that live
+there and the lights that should react:
+
+```yaml
+rooms:
+  living_room:
+    name: "Living Room"
+    plex_clients:
+      - title: "Living Room Apple TV"   # match by title, or...
+        uuid: null                       # ...uuid, once known (more stable)
+    lights:
+      - brand: govee
+        id: "device-id-once-known"
+        name: "Couch Lamp"
+```
+
+Workflow to fill it in: play something on the target device, hit
+`GET /clients` to read off its real `title`/`uuid`, add it under the right
+room in `config/rooms.yaml`, then `POST /rooms/reload`.
+
+Dispatch logic (`app/dispatcher.py`): a room tracks the set of clients
+currently playing in it. The first client to start playing triggers a
+`dim` action for every light in that room; the last client to
+pause/stop triggers `restore`. Multiple simultaneous clients in the same
+room are handled correctly (lights only restore once *all* of them have
+stopped).
+
+Light control (`app/lights.py`) is currently a **stub** — it logs the
+intended action instead of calling a real device. This lets the room/
+session logic be exercised against real Plex events before any brand API
+work happens. Next step per room-config decisions still open:
+
+- **Govee**: LAN control exists on newer models but is off by default
+  (enable per-device in the Govee app) and some effects stay cloud-only
+  even then.
+- **Gosund/Tuya-based lights**: most current models can no longer be
+  flashed to Tasmota/ESPHome; local control instead needs a Tuya local
+  key extracted via `tinytuya`, which requires a one-time Tuya IoT
+  Platform cloud project setup.
+
+Once real device control exists, swap `StubController` in
+`app/lights.py` for brand-specific implementations (`GoveeController`,
+`TuyaController`) behind the same `apply(action, light)` interface —
+`dispatcher.py` doesn't need to change.
+
+Dispatcher activity is also exported as Prometheus metrics
+(`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
+and shown on the same Grafana dashboard.

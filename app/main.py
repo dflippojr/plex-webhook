@@ -8,7 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
-from app.db import get_connection, insert_event
+from app import dispatcher
+from app.db import get_connection, insert_event, list_known_clients
+from app.rooms import registry
 
 app = FastAPI(title="plex-webhook")
 
@@ -39,6 +41,23 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/clients")
+async def clients():
+    """Distinct Plex clients seen so far, to help fill in config/rooms.yaml."""
+    return {"clients": list_known_clients(db_conn)}
+
+
+@app.get("/rooms")
+async def rooms():
+    return {"rooms": registry.rooms}
+
+
+@app.post("/rooms/reload")
+async def reload_rooms():
+    registry.reload()
+    return {"status": "reloaded", "rooms": list(registry.rooms.keys())}
 
 
 @app.post("/webhook")
@@ -79,6 +98,8 @@ async def plex_webhook(request: Request):
     player_title = (payload or {}).get("Player", {}).get("title") or "unknown"
     EVENTS_TOTAL.labels(event=event_type or "unknown", player=player_title, account=account_title).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
+
+    dispatcher.handle_event(payload)
 
     logger.info("captured event=%s", event_type)
     return {"status": "received", "event": event_type}

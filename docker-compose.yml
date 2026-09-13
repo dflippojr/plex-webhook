@@ -12,5 +12,6 @@ services:
       - "127.0.0.1:9800:8000"
     volumes:
       - ./data:/data
+      - ./config:/config:ro
     networks:
       - monitoring

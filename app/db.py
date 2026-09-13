@@ -55,3 +55,19 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
         ),
     )
     conn.commit()
+
+
+def list_known_clients(conn):
+    rows = conn.execute(
+        """
+        SELECT player_title, player_uuid, COUNT(*) as event_count, MAX(received_at) as last_seen
+        FROM events
+        WHERE player_title IS NOT NULL
+        GROUP BY player_title, player_uuid
+        ORDER BY last_seen DESC
+        """
+    ).fetchall()
+    return [
+        {"title": row[0], "uuid": row[1], "event_count": row[2], "last_seen": row[3]}
+        for row in rows
+    ]

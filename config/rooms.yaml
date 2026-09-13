@@ -1,0 +1,33 @@
+# Manually maintained room -> Plex client -> lights mapping.
+#
+# Discover the exact client identifiers Plex sends by hitting GET /clients
+# on this service after playing something on the device you want to map -
+# it lists every distinct Player title/uuid seen in captured events.
+#
+# Matching: a client is matched by uuid if given (stable across renames),
+# otherwise by title (case-insensitive exact match).
+#
+# Lights are placeholders until brand-specific control (Govee LAN / Tuya
+# local-key) is implemented - the dispatcher logs the intended dim/restore
+# action for each light without calling out to a device yet.
+
+rooms:
+  living_room:
+    name: "Living Room"
+    plex_clients:
+      - title: "TODO: e.g. Living Room Apple TV"
+        uuid: null
+    lights:
+      - brand: govee   # govee | tuya
+        id: "TODO-device-id"
+        name: "TODO-light-name"
+
+  bedroom:
+    name: "Bedroom"
+    plex_clients:
+      - title: "TODO: e.g. Google TV"
+        uuid: null
+    lights:
+      - brand: tuya
+        id: "TODO-device-id"
+        name: "TODO-light-name"
