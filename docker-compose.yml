@@ -1,3 +1,8 @@
+networks:
+  monitoring:
+    external: true
+    name: observability-stack_monitoring
+
 services:
   plex-webhook:
     build: .
@@ -7,3 +12,5 @@ services:
       - "127.0.0.1:9800:8000"
     volumes:
       - ./data:/data
+    networks:
+      - monitoring
