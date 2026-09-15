@@ -57,6 +57,11 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
     conn.commit()
 
 
+def last_received_at(conn):
+    row = conn.execute("SELECT MAX(received_at) FROM events").fetchone()
+    return row[0] if row else None
+
+
 def list_known_clients(conn):
     rows = conn.execute(
         """

@@ -25,6 +25,15 @@ DISPATCH_ACTIONS_TOTAL = Counter(
 _active_clients: dict[str, set] = {}
 
 
+def init_room_gauges():
+    """Export every configured room so dashboards see 0 after a restart, not a stale pre-restart value."""
+    for room_key in registry.rooms:
+        ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(_active_clients.get(room_key, ())))
+
+
+init_room_gauges()
+
+
 def _client_id(payload: dict) -> str:
     player = (payload or {}).get("Player") or {}
     return player.get("uuid") or player.get("title") or "unknown"

@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import dispatcher
-from app.db import get_connection, insert_event, list_known_clients
+from app.db import get_connection, insert_event, last_received_at, list_known_clients
 from app.rooms import registry
 
 app = FastAPI(title="plex-webhook")
@@ -31,6 +31,11 @@ LAST_EVENT_TIMESTAMP = Gauge(
     "plex_webhook_last_event_timestamp_seconds",
     "Unix timestamp of the last received Plex webhook event",
 )
+
+# Seed from SQLite so a container restart doesn't report 0 (i.e. 1970)
+_last = last_received_at(db_conn)
+if _last:
+    LAST_EVENT_TIMESTAMP.set(datetime.fromisoformat(_last).timestamp())
 
 
 @app.get("/health")
@@ -57,6 +62,7 @@ async def rooms():
 @app.post("/rooms/reload")
 async def reload_rooms():
     registry.reload()
+    dispatcher.init_room_gauges()
     return {"status": "reloaded", "rooms": list(registry.rooms.keys())}
 
 
