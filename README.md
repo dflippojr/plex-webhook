@@ -77,23 +77,22 @@ pause/stop triggers `restore`. Multiple simultaneous clients in the same
 room are handled correctly (lights only restore once *all* of them have
 stopped).
 
-Light control (`app/lights.py`) is currently a **stub** — it logs the
-intended action instead of calling a real device. This lets the room/
-session logic be exercised against real Plex events before any brand API
-work happens. Next step per room-config decisions still open:
+Light control (`app/lights.py`) now has real per-brand controllers:
 
-- **Govee**: LAN control exists on newer models but is off by default
-  (enable per-device in the Govee app) and some effects stay cloud-only
-  even then.
-- **Gosund/Tuya-based lights**: most current models can no longer be
-  flashed to Tasmota/ESPHome; local control instead needs a Tuya local
-  key extracted via `tinytuya`, which requires a one-time Tuya IoT
-  Platform cloud project setup.
+- **`GoveeController`**: hybrid control — tries LAN control (UDP) first,
+  falls back to the Govee Cloud API if LAN discovery/control fails or
+  isn't supported on that device.
+- **`TuyaController`** (covers Gosund-based lights): hybrid control via
+  the `tinytuya` package — local control (device id + local key + IP)
+  first, Tuya Cloud API fallback.
 
-Once real device control exists, swap `StubController` in
-`app/lights.py` for brand-specific implementations (`GoveeController`,
-`TuyaController`) behind the same `apply(action, light)` interface —
-`dispatcher.py` doesn't need to change.
+Both controllers catch every failure internally (missing credentials,
+unreachable device, network error) and log a warning rather than raising,
+so the dispatcher keeps working with zero devices configured. No real
+credentials exist in this repo — see **[SETUP.md](SETUP.md)** for how to
+gather your own Govee API key, enable Govee LAN Control per device, and
+set up a Tuya IoT Platform project + run `tinytuya wizard` to get local
+keys for your devices.
 
 Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)

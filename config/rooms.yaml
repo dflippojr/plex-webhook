@@ -7,9 +7,18 @@
 # Matching: a client is matched by uuid if given (stable across renames),
 # otherwise by title (case-insensitive exact match).
 #
-# Lights are placeholders until brand-specific control (Govee LAN / Tuya
-# local-key) is implemented - the dispatcher logs the intended dim/restore
-# action for each light without calling out to a device yet.
+# Lights: brand/id/name here are safe to make public. Real per-device
+# secrets (Tuya local_key/ip, or a pinned Govee LAN ip) live in
+# config/devices.secrets.yaml (gitignored - see
+# config/devices.secrets.yaml.example) keyed by this same `id`.
+#
+# Optional `model` field (Govee only): the device SKU (e.g. "H6159"),
+# found in the Govee Home app under the device's settings. Only needed
+# for Govee Cloud API fallback control - not required for LAN control.
+#
+# Until real credentials are gathered (see SETUP.md), GoveeController and
+# TuyaController (app/lights.py) will fail to reach any device, log a
+# warning, and move on - the dispatcher keeps working either way.
 
 rooms:
   living_room:
@@ -21,6 +30,7 @@ rooms:
       - brand: govee   # govee | tuya
         id: "TODO-device-id"
         name: "TODO-light-name"
+        model: "TODO-govee-sku"   # optional, e.g. "H6159" - cloud fallback only
 
   bedroom:
     name: "Bedroom"
