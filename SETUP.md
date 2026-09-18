@@ -31,7 +31,8 @@ it's off by default and only supported on some models.
 3. If the device doesn't have a LAN Control toggle, it doesn't support
    it - the code will automatically fall back to the Cloud API for that
    device as long as `GOVEE_API_KEY` is set and `model` (SKU) is filled
-   in for it in `config/rooms.yaml`.
+   in for it in `config/rooms.yaml` (copy from `config/rooms.yaml.example`
+   if you haven't already; that live file is gitignored).
 4. Note the device's SKU/model, shown in the app under the device's
    settings (e.g. `H6159`) - put it in the `model` field for that light in
    `config/rooms.yaml`.
@@ -90,9 +91,11 @@ wizard) and update `config/devices.secrets.yaml`.
 ## 4. Map rooms and Plex clients
 
 This part is unchanged from the original Phase 3 workflow - see the
-"Phase 3" section of `README.md`: play something on the target device,
+"Phase 3" section of `README.md`: copy `config/rooms.yaml.example` to
+`config/rooms.yaml` if needed, play something on the target device,
 hit `GET /clients` to read off its real Plex `title`/`uuid`, fill in
-`config/rooms.yaml`, then `POST /rooms/reload`.
+the local `config/rooms.yaml`, then `POST /rooms/reload`. Do not commit
+`rooms.yaml`.
 
 ## 5. Restart with real credentials
 

@@ -50,7 +50,7 @@ async def metrics():
 
 @app.get("/clients")
 async def clients():
-    """Distinct Plex clients seen so far, to help fill in config/rooms.yaml."""
+    """Distinct Plex clients seen so far, to help fill in the local config/rooms.yaml."""
     return {"clients": list_known_clients(db_conn)}
 
 

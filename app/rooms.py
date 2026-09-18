@@ -18,7 +18,10 @@ class RoomRegistry:
 
     def reload(self):
         if not self.config_path.exists():
-            logger.warning("rooms config not found at %s - dispatcher disabled", self.config_path)
+            logger.warning(
+                "rooms config not found at %s - copy config/rooms.yaml.example to config/rooms.yaml (dispatcher disabled until then)",
+                self.config_path,
+            )
             self.rooms = {}
             self._uuid_index = {}
             self._title_index = {}

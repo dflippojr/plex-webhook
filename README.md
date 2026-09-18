@@ -29,7 +29,7 @@ http://127.0.0.1:9800/webhook
 - `GET /metrics` — Prometheus metrics.
 - `GET /clients` — every distinct Plex client (`title` + `uuid`) seen in
   captured events, with event count and last-seen time. Use this to find
-  the exact identifiers to put in `config/rooms.yaml`.
+  the exact identifiers to put in your local `config/rooms.yaml`.
 - `GET /rooms` — the currently loaded room config.
 - `POST /rooms/reload` — reload `config/rooms.yaml` without restarting the
   container (edits to the file otherwise only take effect on restart).
@@ -50,8 +50,9 @@ dashboard in the "Basement PC" folder.
 
 ## Phase 3 — room-based light dispatcher
 
-`config/rooms.yaml` manually maps each room to the Plex clients that live
-there and the lights that should react:
+Copy `config/rooms.yaml.example` to `config/rooms.yaml` (gitignored — it
+will hold real Plex client UUIDs). That file maps each room to the Plex
+clients that live there and the lights that should react:
 
 ```yaml
 rooms:
@@ -68,7 +69,8 @@ rooms:
 
 Workflow to fill it in: play something on the target device, hit
 `GET /clients` to read off its real `title`/`uuid`, add it under the right
-room in `config/rooms.yaml`, then `POST /rooms/reload`.
+room in the local `config/rooms.yaml`, then `POST /rooms/reload`. Do not
+commit that file.
 
 Dispatch logic (`app/dispatcher.py`): a room tracks the set of clients
 currently playing in it. The first client to start playing triggers a

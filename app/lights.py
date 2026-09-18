@@ -12,6 +12,8 @@ Credentials come from two places (see SETUP.md):
 - config/devices.secrets.yaml (gitignored): per-device local_key/ip for
   Tuya devices, and optionally a static ip for Govee devices whose LAN
   discovery isn't reliable. See config/devices.secrets.yaml.example.
+  Live room mapping (Plex client UUIDs, device ids) is local
+  config/rooms.yaml, also gitignored; start from rooms.yaml.example.
 
 Every public apply() call is defensive: missing credentials, unreachable
 devices, unknown device ids, and library/network errors are all caught

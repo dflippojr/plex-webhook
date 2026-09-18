@@ -1,4 +1,6 @@
-# Manually maintained room -> Plex client -> lights mapping.
+# Copy this file to `config/rooms.yaml` (gitignored) and fill in real
+# values. rooms.yaml holds Plex client UUIDs and device ids, so it is
+# not committed to this public repo.
 #
 # Discover the exact client identifiers Plex sends by hitting GET /clients
 # on this service after playing something on the device you want to map -
@@ -7,18 +9,13 @@
 # Matching: a client is matched by uuid if given (stable across renames),
 # otherwise by title (case-insensitive exact match).
 #
-# Lights: brand/id/name here are safe to make public. Real per-device
-# secrets (Tuya local_key/ip, or a pinned Govee LAN ip) live in
-# config/devices.secrets.yaml (gitignored - see
-# config/devices.secrets.yaml.example) keyed by this same `id`.
+# Per-device secrets (Tuya local_key/ip, or a pinned Govee LAN ip) live
+# in config/devices.secrets.yaml (also gitignored - see
+# config/devices.secrets.yaml.example) keyed by this same light `id`.
 #
 # Optional `model` field (Govee only): the device SKU (e.g. "H6159"),
 # found in the Govee Home app under the device's settings. Only needed
 # for Govee Cloud API fallback control - not required for LAN control.
-#
-# Until real credentials are gathered (see SETUP.md), GoveeController and
-# TuyaController (app/lights.py) will fail to reach any device, log a
-# warning, and move on - the dispatcher keeps working either way.
 
 rooms:
   living_room:
