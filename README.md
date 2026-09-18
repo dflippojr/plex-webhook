@@ -98,3 +98,13 @@ Once real device control exists, swap `StubController` in
 Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
 and shown on the same Grafana dashboard.
+
+## Local SonarQube (tower)
+
+Scan from the tower (not from GitHub-hosted Actions):
+
+```powershell
+D:\Docker\sonarqube\scan.ps1 -Path D:\Docker\plex-webhook -ProjectKey plex-webhook
+```
+
+See `D:\Docker\sonarqube\README.md`. Public CI can use SonarCloud later.
