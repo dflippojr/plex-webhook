@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import dispatcher
-from app.db import get_connection, insert_event, last_received_at, list_known_clients
+from app.db import event_counts, get_connection, insert_event, last_received_at, list_known_clients
 from app.rooms import registry
 
 app = FastAPI(title="plex-webhook")
@@ -36,6 +36,10 @@ LAST_EVENT_TIMESTAMP = Gauge(
 _last = last_received_at(db_conn)
 if _last:
     LAST_EVENT_TIMESTAMP.set(datetime.fromisoformat(_last).timestamp())
+
+# Same for event counters, so a restart doesn't look like history was wiped
+for _event, _player, _account, _count in event_counts(db_conn):
+    EVENTS_TOTAL.labels(event=_event, player=_player, account=_account).inc(_count)
 
 
 @app.get("/health")
