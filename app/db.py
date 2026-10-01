@@ -62,6 +62,20 @@ def last_received_at(conn):
     return row[0] if row else None
 
 
+def event_counts(conn):
+    """Event totals per (event, player, account), labeled the way /webhook labels them."""
+    return conn.execute(
+        """
+        SELECT COALESCE(NULLIF(event, ''), 'unknown'),
+               COALESCE(NULLIF(player_title, ''), 'unknown'),
+               COALESCE(NULLIF(account_title, ''), 'unknown'),
+               COUNT(*)
+        FROM events
+        GROUP BY 1, 2, 3
+        """
+    ).fetchall()
+
+
 def list_known_clients(conn):
     rows = conn.execute(
         """
