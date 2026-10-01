@@ -89,24 +89,6 @@ items:
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
-  - key: media-tracker-plex-feed
-    kind: feature
-    title: "Feed Plex watch events into the Notion media tracker"
-    body: |
-      The webhook now stores a durable event log (JSONL + SQLite). The media tracker
-      already syncs anime from MAL; movies/TV were deferred until this log existed, and
-      Plex-played audiobooks were called out as a later source (Audible stays manual).
-
-      Needs product decisions before implementation:
-      - which events count as "watched" (play vs stop vs a progress threshold)
-      - Notion `Type` mapping for movie / episode / audiobook, and how shows vs episodes
-        land as rows
-      - whether this lives in plex-webhook, in media-tracker-sync as a consumer of
-        `/data/plex_events.db` or a small API, or as a third job
-      - how to match Plex titles to existing tracker rows without duplicating MAL anime
-
-      Do not put real paths, logins, tokens, or tailnet names in public comments.
-
   - key: sonarcloud-public-ci
     kind: feature
     title: "Add SonarCloud analysis on GitHub-hosted public CI"
