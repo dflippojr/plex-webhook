@@ -1,0 +1,123 @@
+# Roadmap items mirrored to GitHub issues by scripts/sync_backlog_issues.py.
+#
+# key:    stable id; written into the issue body as <!-- backlog: key --> so reruns never file duplicates
+# kind:   check (verify something already built) | deferred (part of a built phase) | feature (not scheduled)
+# phase:  optional; the phase an item is planned for
+#
+# The script only creates missing issues. It never edits or closes existing ones.
+
+items:
+  - key: wire-rooms-and-credentials
+    kind: check
+    title: "Wire live rooms.yaml and device credentials, then dim on real playback"
+    body: |
+      Phase 3 controllers exist, but live mapping and credentials are still the SETUP.md
+      placeholders. No agent can finish this; it needs the physical devices and the
+      owner's accounts.
+
+      Remaining owner steps (Govee API key is already obtained):
+      - enable LAN Control on each Govee device and note its SKU
+      - create a Tuya IoT Platform cloud project, link the Smart Life/Tuya app, and run
+        `tinytuya wizard` for device id / local_key / ip
+      - copy the committed `.example` files to gitignored `.env`,
+        `config/devices.secrets.yaml`, and `config/rooms.yaml`, then fill real values
+      - play something on each mapped Plex client, read `title`/`uuid` from `GET /clients`,
+        and put those identifiers in the local rooms file
+      - rebuild/restart the container so env and secrets are picked up
+
+      Exit test: play on a mapped client and confirm that room's lights dim; pause/stop
+      the last client in that room and confirm they restore. Keep real UUIDs, device ids,
+      and local keys out of git — the repo is public.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: verify-govee-lan
+    kind: check
+    title: "Verify Govee LAN control against a real bulb"
+    body: |
+      `GoveeController` tries UDP LAN control first and falls back to the Govee Cloud API.
+      The LAN path is based on community reverse-engineering (`govee_led_wez` /
+      `python-govee-led` / `govee-lan-api`) and has not been run against real hardware.
+
+      Protocol as implemented:
+      - multicast scan to 239.255.255.250:4001
+      - replies on UDP 4002
+      - unicast turn/brightness commands on UDP 4003
+
+      After rooms and credentials are wired, confirm LAN discovery (or a pinned static
+      `ip` in `config/devices.secrets.yaml`) actually drives a real bulb. If LAN fails
+      and cloud works, record the failure (VLAN, AP isolation, Docker network, unsupported
+      SKU) and fix `_discover_ip` / `_send_lan_command` rather than silently staying on
+      cloud. Cloud fallback still needs `model` (SKU) in rooms.yaml.
+
+      Blocked on wiring live rooms and credentials.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: verify-tuya-dps
+    kind: check
+    title: "Verify Tuya/Gosund DPS indices against a real device"
+    body: |
+      `TuyaController` assumes firmware-specific datapoints that have not been checked
+      against the owner's Gosund/Tuya hardware:
+      - local tinytuya: DPS `3` for brightness, scale 10–1000
+      - cloud: `switch_1` plus `bright_value_v2`
+
+      These codes vary by device and firmware. After `tinytuya wizard` keys are in
+      `config/devices.secrets.yaml`, dim/restore a real device and confirm both local
+      and cloud paths. If a command is a no-op or errors, inspect that device's DPS map
+      and adjust the small `set_value` / `sendcommand` calls in `app/lights.py` rather
+      than rewriting the hybrid controller.
+
+      Blocked on wiring live rooms and credentials.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: persist-event-counters
+    kind: deferred
+    title: "Seed Prometheus event counters from SQLite after a restart"
+    body: |
+      Startup already reloads `plex_webhook_last_event_timestamp_seconds` from SQLite
+      and reports 0 for every configured room so Grafana does not keep a stale
+      pre-restart value. Event counters (`plex_webhook_events_total` and the Total /
+      Cumulative dashboard panels) still start at zero whenever the container restarts.
+
+      Seed those counters from the `events` table the same way the timestamp gauge is
+      seeded, grouped by the existing labels (`event`, `player`, `account`). Keep the
+      Grafana dashboard on `increase()`-based 24h/rate panels; do not switch them to raw
+      cumulative counters. A restart should not look like a wipe of historical volume.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: media-tracker-plex-feed
+    kind: feature
+    title: "Feed Plex watch events into the Notion media tracker"
+    body: |
+      The webhook now stores a durable event log (JSONL + SQLite). The media tracker
+      already syncs anime from MAL; movies/TV were deferred until this log existed, and
+      Plex-played audiobooks were called out as a later source (Audible stays manual).
+
+      Needs product decisions before implementation:
+      - which events count as "watched" (play vs stop vs a progress threshold)
+      - Notion `Type` mapping for movie / episode / audiobook, and how shows vs episodes
+        land as rows
+      - whether this lives in plex-webhook, in media-tracker-sync as a consumer of
+        `/data/plex_events.db` or a small API, or as a third job
+      - how to match Plex titles to existing tracker rows without duplicating MAL anime
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: sonarcloud-public-ci
+    kind: feature
+    title: "Add SonarCloud analysis on GitHub-hosted public CI"
+    body: |
+      Tower-local SonarQube already scans this repo (`sonar-project.properties`,
+      `scan.ps1`). GitHub-hosted Actions for this public repo should not talk to the
+      homelab SonarQube. README leaves SonarCloud as the later public-CI option.
+
+      Needs product decisions before implementation:
+      - SonarCloud org/project binding and where the token lives
+      - whether analysis runs on every PR, on `master` only, or both
+      - quality-gate policy (informational vs blocking)
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
