@@ -1,0 +1,49 @@
+name: SonarCloud
+
+# SonarCloud analysis on GitHub-hosted runners, for pull requests and pushes to
+# master. The quality gate is informational for now (no sonar.qualitygate.wait),
+# so this check only fails if the scan itself errors.
+#
+# sonar-project.properties stays set up for the tower-local SonarQube scan;
+# the SonarCloud project key and organization are passed as scanner arguments
+# here instead. The scan is skipped until the SONAR_TOKEN repository secret
+# exists. There is no test suite yet, so no coverage report is uploaded.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: sonar-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonar:
+    runs-on: ubuntu-latest
+    # Secrets are not passed to pull requests from forks; skip rather than fail.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so SonarCloud can blame lines and find the PR base.
+          fetch-depth: 0
+
+      - name: Note missing token
+        if: env.SONAR_TOKEN == ''
+        run: echo "::notice::SONAR_TOKEN secret is not set; skipping the SonarCloud scan."
+
+      - name: Scan with SonarCloud
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: >
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.organization=dflippojr
+            -Dsonar.projectKey=dflippojr_plex-webhook
