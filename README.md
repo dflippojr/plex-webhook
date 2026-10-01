@@ -3,6 +3,8 @@
 A Plex Pass webhook receiver that captures play/pause/stop/rate events and
 can dim/restore lights per room based on which Plex client is playing.
 
+Phases 1–3 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`.
+
 ## Run
 
 ```
