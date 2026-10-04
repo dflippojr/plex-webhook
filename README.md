@@ -14,6 +14,15 @@ docker compose up -d --build
 Binds to `127.0.0.1:9800` only (loopback) since Plex Media Server runs on
 the same host — no need to expose this beyond localhost.
 
+The container runs as an unprivileged user (uid 10001), so `./data` must
+be writable by it. Docker Desktop bind mounts on Windows already are; on a
+Linux host, run `sudo chown -R 10001 data` once.
+
+Dependencies install from `requirements.lock`, which locks every
+transitive package with hashes. After editing the direct pins in
+`requirements.txt`, regenerate it with `./scripts/lock_requirements.sh`
+(needs Docker) and commit both files.
+
 ## Configure in Plex
 
 Plex web UI → Settings → Account → Webhooks → Add Webhook:
