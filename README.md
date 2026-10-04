@@ -111,12 +111,22 @@ Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
 and shown on the same Grafana dashboard.
 
-## Local SonarQube (tower)
+## Code analysis
 
-Scan from the tower (not from GitHub-hosted Actions):
+SonarCloud is the main analysis path. `.github/workflows/sonar.yml` scans
+every pull request and every push to `master` on GitHub-hosted runners
+(project `dflippojr_plex-webhook`). The quality gate is informational for
+now, so the check fails only if the scan itself errors. The scan is skipped
+when the `SONAR_TOKEN` repository secret is not set, and on pull requests
+from forks. There is no test suite yet, so no coverage is uploaded.
+
+### Optional: local SonarQube (tower)
+
+`sonar-project.properties` is set up for a tower-local SonarQube instance
+(project key `plex-webhook`). To scan from the tower:
 
 ```powershell
 D:\Docker\sonarqube\scan.ps1 -Path D:\Docker\plex-webhook -ProjectKey plex-webhook
 ```
 
-See `D:\Docker\sonarqube\README.md`. Public CI can use SonarCloud later.
+See `D:\Docker\sonarqube\README.md`.
