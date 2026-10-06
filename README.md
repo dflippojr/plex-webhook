@@ -3,7 +3,15 @@
 A Plex Pass webhook receiver that captures play/pause/stop/rate events and
 can dim/restore lights per room based on which Plex client is playing.
 
-Phases 1–3 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`.
+Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
+`docs/backlog.yaml` (finished items stay there marked `status: done`):
+
+- [#2](https://github.com/dflippojr/plex-webhook/issues/2) wire live `rooms.yaml` and device credentials, then dim on real playback
+- [#3](https://github.com/dflippojr/plex-webhook/issues/3) verify Govee LAN control against a real bulb (blocked on #2)
+- [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
+
+The next planned steps are those three hardware checks; they need the owner's devices
+and accounts. Other open issues (for example #13, #17, #19) cover deployment and repo upkeep.
 
 ## Run
 

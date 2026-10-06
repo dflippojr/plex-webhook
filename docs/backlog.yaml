@@ -3,6 +3,10 @@
 # key:    stable id; written into the issue body as <!-- backlog: key --> so reruns never file duplicates
 # kind:   check (verify something already built) | deferred (part of a built phase) | feature (not scheduled)
 # phase:  optional; the phase an item is planned for
+# status: optional; `done` marks finished work. Done items stay in this file as history,
+#         with `issue:` set to the closed issue's number, and the script never files them.
+#         Mark an item done (and add its issue number) when its issue closes.
+#         Bodies of done items are kept as originally filed; the issue is the record.
 #
 # The script only creates missing issues. It never edits or closes existing ones.
 
@@ -75,31 +79,36 @@ items:
 
   - key: persist-event-counters
     kind: deferred
+    status: done
+    issue: 5  # PR #10
     title: "Seed Prometheus event counters from SQLite after a restart"
     body: |
-      Startup already reloads `plex_webhook_last_event_timestamp_seconds` from SQLite
+      Startup reloads `plex_webhook_last_event_timestamp_seconds` from SQLite
       and reports 0 for every configured room so Grafana does not keep a stale
       pre-restart value. Event counters (`plex_webhook_events_total` and the Total /
-      Cumulative dashboard panels) still start at zero whenever the container restarts.
+      Cumulative dashboard panels) started at zero whenever the container restarted.
 
       Seed those counters from the `events` table the same way the timestamp gauge is
       seeded, grouped by the existing labels (`event`, `player`, `account`). Keep the
       Grafana dashboard on `increase()`-based 24h/rate panels; do not switch them to raw
       cumulative counters. A restart should not look like a wipe of historical volume.
 
+      Built in #5 (PR #10): startup seeds the counters from the `events` table.
+
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
   - key: sonarcloud-public-ci
     kind: feature
+    status: done
+    issue: 7  # PR #12
     title: "Add SonarCloud analysis on GitHub-hosted public CI"
     body: |
       Tower-local SonarQube already scans this repo (`sonar-project.properties`,
       `scan.ps1`). GitHub-hosted Actions for this public repo should not talk to the
-      homelab SonarQube. README leaves SonarCloud as the later public-CI option.
+      homelab SonarQube.
 
-      Needs product decisions before implementation:
-      - SonarCloud org/project binding and where the token lives
-      - whether analysis runs on every PR, on `master` only, or both
-      - quality-gate policy (informational vs blocking)
+      Decided and built (#7, PR #12): analysis runs on every pull request and every push
+      to `master`; the quality gate is informational. See the README "Code analysis"
+      section.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
