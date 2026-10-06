@@ -7,7 +7,8 @@ name: SonarCloud
 # sonar-project.properties stays set up for the tower-local SonarQube scan;
 # the SonarCloud project key and organization are passed as scanner arguments
 # here instead. The scan is skipped until the SONAR_TOKEN repository secret
-# exists. There is no test suite yet, so no coverage report is uploaded.
+# exists. The offline pytest suite runs first; its coverage.xml is handed to
+# the scan through sonar.python.coverage.reportPaths.
 on:
   push:
     branches: [master]
@@ -23,7 +24,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest --cov=app --cov-report=xml --cov-report=term
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
+
   sonar:
+    needs: tests
     runs-on: ubuntu-latest
     # Secrets are not passed to pull requests from forks; skip rather than fail.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
@@ -34,6 +59,10 @@ jobs:
         with:
           # Full history so SonarCloud can blame lines and find the PR base.
           fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
 
       - name: Note missing token
         if: env.SONAR_TOKEN == ''
@@ -47,3 +76,4 @@ jobs:
             -Dsonar.host.url=https://sonarcloud.io
             -Dsonar.organization=dflippojr
             -Dsonar.projectKey=dflippojr_plex-webhook
+            -Dsonar.python.coverage.reportPaths=coverage.xml

@@ -1,7 +1,8 @@
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path("/data/plex_events.db")
+DB_PATH = Path(os.environ.get("DB_PATH", "/data/plex_events.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
