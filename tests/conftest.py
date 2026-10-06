@@ -121,3 +121,10 @@ def payload(event, title="Living Room TV", uuid=None, account="dan"):
         "Player": {"title": title, "uuid": uuid},
         "Metadata": {"type": "movie", "title": "A Film", "ratingKey": "42"},
     }
+
+
+def drain():
+    """Wait for queued light actions (they run on the dispatcher's worker thread)."""
+    from app import dispatcher
+
+    dispatcher._action_executor.submit(lambda: None).result(timeout=30)

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
-from conftest import payload
+from conftest import drain, payload
 
 
 @pytest.fixture
@@ -42,6 +42,8 @@ def test_webhook_valid_payload_records_and_dispatches(client, light_calls):
         ("media.play", "Living Room TV", "A Film")
     ]
     assert json.loads(client.log.read_text().splitlines()[0])["event"] == "media.play"
+    drain()
+    drain()
     assert light_calls == [("dim", ["AA:BB"])]
 
 
@@ -50,6 +52,7 @@ def test_webhook_invalid_json_still_200_and_recorded(client, light_calls):
     assert resp.status_code == 200
     assert resp.json() == {"status": "received", "event": None}
     assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    drain()
     assert light_calls == []
 
 

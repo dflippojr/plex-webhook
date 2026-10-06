@@ -1,15 +1,17 @@
 from prometheus_client import REGISTRY
 
 from app import dispatcher
-from conftest import payload
+from conftest import drain, payload
 
 
 def play(title="Living Room TV", uuid=None):
     dispatcher.handle_event(payload("media.play", title, uuid))
+    drain()
 
 
 def stop(title="Living Room TV", uuid=None, event="media.stop"):
     dispatcher.handle_event(payload(event, title, uuid))
+    drain()
 
 
 def test_single_client_dims_then_restores(registry, light_calls):
@@ -23,6 +25,7 @@ def test_pause_restores_and_resume_dims(registry, light_calls):
     play()
     stop(event="media.pause")
     dispatcher.handle_event(payload("media.resume"))
+    drain()
     assert [c[0] for c in light_calls] == ["dim", "restore", "dim"]
 
 
@@ -69,6 +72,7 @@ def test_other_events_and_empty_payload_ignored(registry, light_calls):
     dispatcher.handle_event(payload("library.new"))
     dispatcher.handle_event(None)
     dispatcher.handle_event({})
+    drain()
     assert light_calls == []
 
 
