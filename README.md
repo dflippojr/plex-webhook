@@ -145,10 +145,30 @@ CI runs the same command on GitHub-hosted runners, not in the Docker image.
 SonarCloud is the main analysis path. `.github/workflows/sonar.yml` scans
 every pull request and every push to `master` on GitHub-hosted runners
 (project `dflippojr_plex-webhook`). The quality gate is informational for
-now, so the check fails only if the scan itself errors. The scan is skipped
-when the `SONAR_TOKEN` repository secret is not set, and on pull requests
-from forks. The offline pytest suite runs first (see [Tests](#tests)) and its
-`coverage.xml` is passed to the scan.
+now, so the check fails only if the scan itself errors. Pull requests from
+forks skip the scan. When `SONAR_TOKEN` is absent, CI emits a notice and a
+job summary explaining that no analysis ran; a green workflow in that case
+does not establish a passing SonarCloud quality gate. The offline pytest suite
+runs first (see [Tests](#tests)) and its `coverage.xml` is passed to the scan.
+
+Store an authorized analysis token as `SONAR_TOKEN` in both repository secret
+stores under **Settings → Secrets and variables**: **Actions** for ordinary
+PRs and pushes, and **Dependabot** for Dependabot-triggered PRs. GitHub selects
+the appropriate store for the triggering actor; Actions secrets are unavailable
+to Dependabot runs. Never put token values in configuration or logs.
+
+`.github/dependabot.yml` schedules weekly updates at the repository root for
+pip (`requirements.txt`, `requirements-dev.txt` and the compiled requirements),
+Docker (`Dockerfile` and `docker-compose.yml`) and GitHub Actions (workflow
+action references). Review Python updates against `requirements.lock`, which
+the production image installs; regenerate it with `./scripts/lock_requirements.sh`
+if an update changes direct pins without refreshing the lockfile.
+
+After merging the configuration, verify a default-branch scan and a real
+Dependabot PR scan in Actions, then confirm the matching commit/PR analysis
+in [SonarCloud](https://sonarcloud.io/project/overview?id=dflippojr_plex-webhook).
+Adding a secret alone does not publish analysis; rerun the affected workflow.
+CI configuration changes need no live-stack commands or container restart.
 
 ### Optional: local SonarQube (tower)
 

@@ -6,9 +6,10 @@ name: SonarCloud
 #
 # sonar-project.properties stays set up for the tower-local SonarQube scan;
 # the SonarCloud project key and organization are passed as scanner arguments
-# here instead. The scan is skipped until the SONAR_TOKEN repository secret
-# exists. The offline pytest suite runs first; its coverage.xml is handed to
-# the scan through sonar.python.coverage.reportPaths.
+# here instead. SONAR_TOKEN must exist in Actions secrets for ordinary runs
+# and in Dependabot secrets for dependency PRs. A missing token produces a
+# notice, not an analysis result. The offline pytest suite runs first; its
+# coverage.xml is handed to the scan through sonar.python.coverage.reportPaths.
 on:
   push:
     branches: [master]
@@ -50,7 +51,8 @@ jobs:
   sonar:
     needs: tests
     runs-on: ubuntu-latest
-    # Secrets are not passed to pull requests from forks; skip rather than fail.
+    # Forks cannot access secrets. Same-repository PRs, including Dependabot,
+    # may scan; GitHub supplies Dependabot secrets for Dependabot-triggered runs.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -61,12 +63,16 @@ jobs:
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
+        if: env.SONAR_TOKEN != ''
         with:
           name: coverage
 
       - name: Note missing token
         if: env.SONAR_TOKEN == ''
-        run: echo "::notice::SONAR_TOKEN secret is not set; skipping the SonarCloud scan."
+        run: |
+          echo "::notice::SONAR_TOKEN is absent from the triggering actor's secret store; SonarCloud analysis did not run. Configure Actions and Dependabot secrets separately."
+          echo "### SonarCloud analysis did not run" >> "$GITHUB_STEP_SUMMARY"
+          echo 'The scan was skipped because SONAR_TOKEN is absent. This green workflow is not evidence of analysis or a passing quality gate. Add SONAR_TOKEN to the repository Actions and Dependabot secret stores, then rerun the applicable workflow.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Scan with SonarCloud
         if: env.SONAR_TOKEN != ''
