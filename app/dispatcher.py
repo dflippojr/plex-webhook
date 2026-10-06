@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from prometheus_client import Counter, Gauge
 
@@ -20,6 +21,11 @@ DISPATCH_ACTIONS_TOTAL = Counter(
     "Total light actions dispatched",
     ["room", "action"],
 )
+
+# One worker applies every light action in the order it was queued, so a restore
+# can never overtake an earlier dim for the same room, and a slow or unreachable
+# light only delays later actions, never the event loop.
+_action_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="light-action")
 
 # room_key -> set of client identifiers currently playing in that room
 _active_clients: dict[str, set] = {}
@@ -71,7 +77,16 @@ def handle_event(payload: dict):
 
 
 def _dispatch(room_key: str, action: str):
-    room_lights = registry.lights_for(room_key)
-    logger.info("room=%s action=%s lights=%d", room_key, action, len(room_lights))
-    lights.apply_action(action, room_lights)
+    """Queue the light action on the worker thread and return its Future."""
+    return _action_executor.submit(_apply, room_key, action)
+
+
+def _apply(room_key: str, action: str):
+    try:
+        room_lights = registry.lights_for(room_key)
+        logger.info("room=%s action=%s lights=%d", room_key, action, len(room_lights))
+        lights.apply_action(action, room_lights)
+    except Exception:
+        logger.exception("room=%s action=%s failed", room_key, action)
+        return
     DISPATCH_ACTIONS_TOTAL.labels(room=room_key, action=action).inc()
