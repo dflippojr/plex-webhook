@@ -90,6 +90,10 @@ pause/stop triggers `restore`. Multiple simultaneous clients in the same
 room are handled correctly (lights only restore once *all* of them have
 stopped).
 
+Light actions run on a single background worker thread, in arrival order, so a slow
+or unreachable light never blocks `/health`, `/metrics` or the next webhook; a failed
+action is logged and does not stop later ones. Tests: `pip install -r requirements-dev.txt && pytest`.
+
 Light control (`app/lights.py`) now has real per-brand controllers:
 
 - **`GoveeController`**: hybrid control — tries LAN control (UDP) first,
