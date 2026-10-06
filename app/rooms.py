@@ -1,11 +1,12 @@
 import logging
+import os
 from pathlib import Path
 
 import yaml
 
 logger = logging.getLogger("plex-webhook")
 
-CONFIG_PATH = Path("/config/rooms.yaml")
+CONFIG_PATH = Path(os.environ.get("ROOMS_CONFIG_PATH", "/config/rooms.yaml"))
 
 
 class RoomRegistry:

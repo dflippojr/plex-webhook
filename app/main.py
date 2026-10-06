@@ -1,4 +1,5 @@
 import json
+import os
 import logging
 import time
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from app.rooms import registry
 
 app = FastAPI(title="plex-webhook")
 
-DATA_DIR = Path("/data")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 EVENT_LOG = DATA_DIR / "events.jsonl"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

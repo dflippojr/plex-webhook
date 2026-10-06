@@ -115,6 +115,23 @@ Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
 and shown on the same Grafana dashboard.
 
+## Tests
+
+An offline pytest suite covers the webhook receiver, the room dispatcher, the
+SQLite event store and the Govee and Tuya controllers. Devices, `requests` and
+`tinytuya` are replaced by fakes, and any non-loopback network access fails
+the test. No `/data`, `/config` or `.env` is needed: the suite points the
+paths at a temporary directory through the `DATA_DIR`, `DB_PATH` and
+`ROOMS_CONFIG_PATH` environment variables (unset, they default to `/data`,
+`/data/plex_events.db` and `/config/rooms.yaml`, as in the container).
+
+```bash
+pip install -r requirements-dev.txt   # Python 3.12; netifaces (a tinytuya dependency) needs a C compiler
+pytest --cov=app --cov-report=xml
+```
+
+CI runs the same command on GitHub-hosted runners, not in the Docker image.
+
 ## Code analysis
 
 SonarCloud is the main analysis path. `.github/workflows/sonar.yml` scans
@@ -122,7 +139,8 @@ every pull request and every push to `master` on GitHub-hosted runners
 (project `dflippojr_plex-webhook`). The quality gate is informational for
 now, so the check fails only if the scan itself errors. The scan is skipped
 when the `SONAR_TOKEN` repository secret is not set, and on pull requests
-from forks. There is no test suite yet, so no coverage is uploaded.
+from forks. The offline pytest suite runs first (see [Tests](#tests)) and its
+`coverage.xml` is passed to the scan.
 
 ### Optional: local SonarQube (tower)
 

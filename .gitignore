@@ -5,3 +5,6 @@ __pycache__/
 .scannerwork/
 config/devices.secrets.yaml
 config/rooms.yaml
+coverage.xml
+.coverage
+.pytest_cache/
