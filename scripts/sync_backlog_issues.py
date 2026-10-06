@@ -1,7 +1,7 @@
 """Create GitHub issues for docs/backlog.yaml items that don't have one yet.
 
 Each issue body carries a hidden <!-- backlog: key --> marker; open and closed issues are both checked, so a
-closed item is never re-filed. Existing issues are left alone. Needs the `gh` CLI, logged in.
+closed item is never re-filed. Existing issues are left alone. Items with `status: done` are never filed. Needs the `gh` CLI, logged in.
 
     python scripts/sync_backlog_issues.py            # dry run
     python scripts/sync_backlog_issues.py --apply
@@ -58,10 +58,13 @@ def main() -> None:
         sys.exit("duplicate keys in docs/backlog.yaml")
 
     have = existing_keys()
-    missing = [item for item in items if item["key"] not in have]
+    missing = [item for item in items if item["key"] not in have and item.get("status") != "done"]
     for item in items:
         if item["key"] in have:
-            print(f"  exists  #{have[item['key']]}  {item['title']}")
+            done = "  (done)" if item.get("status") == "done" else ""
+            print(f"  exists  #{have[item['key']]}  {item['title']}{done}")
+        elif item.get("status") == "done":
+            print(f"  done    (no issue found)  {item['title']}")
     for item in missing:
         print(f"  {'create' if args.apply else 'would create'}  {item['title']}")
     if not args.apply or not missing:
