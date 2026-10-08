@@ -65,6 +65,45 @@ Timestamps require a timezone and normalize to UTC. Paginate using
 Use a consistent backup for a fixed export snapshot. Keep redirected exports
 private (PowerShell 7 UTF-8 redirection is recommended).
 
+## Light actions
+
+A room transition (first client plays = `dim`, last client stops = `restore`) writes, all
+sharing the **receipt's `correlation_id`** and one `detail.action_id`:
+
+1. `light.action_queued` (`queued/accepted`, target = room key): written when the work is
+   queued, with a snapshot of the resolved lights and brightness levels. A config reload
+   afterwards does not change a queued action.
+2. `light.result` per light (target = configured light ID), in order. A failing light never
+   stops later lights or actions.
+3. `light.action_summary` (target = room key): the terminal record. Without it the action
+   is **incomplete** (for example after abrupt termination); commands are never replayed on
+   restart and success is never synthesized.
+
+`detail.on_behalf_of` is the initiating actor (the unverified `plex-server`). The row's own
+actor is `system`. `export` adds a `detail` object to these rows only.
+
+Outcomes are transport evidence, **never observed bulb state**:
+
+| outcome | meaning |
+| --- | --- |
+| `command_sent` | Govee LAN UDP datagrams were sent; there is no acknowledgement |
+| `request_accepted_by_transport` | cloud HTTP completed, or the local/cloud Tuya reply held no error |
+| `unconfirmed` | a call returned but nothing establishes acceptance (no fallback is attempted) |
+| `failed` | every attempt errored or was explicitly rejected (`tuya_rejected`) |
+| `skipped` | nothing could be tried (`unsupported_brand`, `missing_credentials`, `missing_model`, `no_address`, `library_unavailable`) |
+
+`detail` also holds the selected `transport` (`lan`, `local`, `cloud`, `none`), the
+`credential_source` kind (`environment`, `device_config`, `none`, never a value),
+`progress` (`turn`, `brightness` completed steps) and every `attempts` entry, so a local
+failure followed by a cloud fallback is visible. Summary outcomes: `completed_unverified`,
+`partial`, `unconfirmed`, `failed`, `skipped`, with per-outcome `counts`.
+
+Follow one action: `list --correlation-id <id>` or `export --correlation-id <id>`.
+Audit write failures after a command was sent are counted and logged, never retried.
+
+`plex_dispatcher_actions_total` is unchanged: it counts completed dispatcher calls, not
+verified per-device success.
+
 ## Failure and integrity limits
 
 Audit failures **do not block webhooks, validation or reload**. The app logs

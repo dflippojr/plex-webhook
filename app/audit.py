@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
     outcome TEXT NOT NULL,
     reason_code TEXT NOT NULL,
     changed_fields TEXT NOT NULL,
-    checksum TEXT NOT NULL
+    checksum TEXT NOT NULL,
+    detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id, id);
@@ -41,6 +42,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, id);
 # ``owner-admin`` client identity (see app.auth); never a request-supplied name.
 ACTOR_IDS = {"plex_server": "plex-server", "admin_token": "owner-admin"}
 ACTOR_VERIFIED = {"admin_token": 1}
+LIGHT_FAILURE_REASONS = {
+    "unsupported_brand", "missing_credentials", "missing_model", "no_address", "library_unavailable",
+    "send_error", "request_failed", "tuya_rejected", "unexpected_error",
+}
 OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
         "received": {"accepted"},
@@ -59,8 +64,32 @@ OPERATIONS = {
     "service.config_load": ("service", "system", "rooms", {
         "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},
     }),
+    # Light-action records share the originating receipt's correlation ID and carry the
+    # initiating actor in ``detail.on_behalf_of``. Outcomes are transport evidence, never
+    # proof of physical state: command_sent / request_accepted_by_transport / unconfirmed.
+    "light.action_queued": ("dispatcher", "system", "room", {"queued": {"accepted"}}),
+    "light.result": ("dispatcher", "system", "light", {
+        "command_sent": {"lan_command_sent"},
+        "request_accepted_by_transport": {"local_accepted", "cloud_accepted"},
+        "unconfirmed": {"result_unconfirmed"},
+        "failed": LIGHT_FAILURE_REASONS,
+        "skipped": LIGHT_FAILURE_REASONS,
+    }),
+    "light.action_summary": ("dispatcher", "system", "room", {
+        "completed_unverified": {"all_sent"}, "partial": {"mixed_results"},
+        "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
+        "failed": {"all_failed", "dispatcher_error"}, "skipped": {"all_skipped", "no_lights"},
+    }),
 }
+LIGHT_REQUESTS = {"dim", "restore"}
+LIGHT_TRANSPORTS = {"lan", "local", "cloud", "none"}
+LIGHT_CREDENTIAL_SOURCES = {"none", "environment", "device_config"}
+LIGHT_STEPS = ("turn", "brightness")
+LABEL_LIMIT = 128
 CHANGE_PATHS = {"rooms", "rooms.count", "rooms.plex_clients", "rooms.lights", "rooms.other"}
+DETAIL_ACTIONS = {"light.action_queued", "light.result", "light.action_summary"}
+RECORD_COLUMNS = ("recorded_at", "correlation_id", "source", "actor_kind", "actor_id", "actor_verified",
+                  "action", "target_kind", "target_id", "outcome", "reason_code", "changed_fields", "checksum")
 WRITE_LOCK = RLock()
 
 
@@ -100,8 +129,68 @@ def configuration_changes(before, after):
     return result
 
 
+def _label(value):
+    """Configured IDs only: bounded strings, never request or exception text."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("Invalid audit label")
+    return value[:LABEL_LIMIT]
+
+
+def _choice(value, allowed):
+    if value not in allowed:
+        raise ValueError("Invalid audit detail")
+    return value
+
+
+def _steps(value):
+    value = list(value)
+    if any(step not in LIGHT_STEPS for step in value) or len(set(value)) != len(value):
+        raise ValueError("Invalid audit detail")
+    return [step for step in LIGHT_STEPS if step in value]
+
+
+def _number(value, maximum):
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ValueError("Invalid audit detail")
+    return value
+
+
+def clean_detail(action, detail):
+    """Rebuild detail from fixed vocabulary; unknown keys and free text never pass through."""
+    detail = dict(detail)
+    result_outcomes = OPERATIONS["light.result"][3]
+    cleaned = {"action_id": str(UUID(detail["action_id"])), "request": _choice(detail["request"], LIGHT_REQUESTS)}
+    actor = _choice(detail["on_behalf_of"], ACTOR_IDS)
+    cleaned["on_behalf_of"] = {"kind": actor, "id": ACTOR_IDS[actor], "verified": ACTOR_VERIFIED.get(actor, 0)}
+    if detail.get("event_id") is not None:
+        cleaned["event_id"] = _number(detail["event_id"], 2 ** 63 - 1)
+    if action == "light.action_queued":
+        cleaned["targets"] = [
+            {"brand": _label(t["brand"]), "id": _label(t["id"]), "brightness": _number(t["brightness"], 100)}
+            for t in detail["targets"]
+        ]
+    elif action == "light.result":
+        cleaned["brand"] = _label(detail["brand"])
+        cleaned["transport"] = _choice(detail["transport"], LIGHT_TRANSPORTS)
+        cleaned["credential_source"] = _choice(detail["credential_source"], LIGHT_CREDENTIAL_SOURCES)
+        cleaned["progress"] = _steps(detail["progress"])
+        cleaned["attempts"] = [
+            {"transport": _choice(a["transport"], LIGHT_TRANSPORTS),
+             "credential_source": _choice(a["credential_source"], LIGHT_CREDENTIAL_SOURCES),
+             "outcome": _choice(a["outcome"], result_outcomes),
+             "reason_code": _choice(a["reason_code"], set().union(*result_outcomes.values())),
+             "progress": _steps(a["progress"])}
+            for a in detail["attempts"]
+        ]
+    else:
+        cleaned["counts"] = {
+            _choice(key, result_outcomes): _number(value, 10 ** 6) for key, value in dict(detail["counts"]).items()
+        }
+    return cleaned
+
+
 def append(path, *, action, outcome, reason_code, correlation, changed_fields=None, event_id=None,
-           admin=False):
+           admin=False, target_id=None, detail=None):
     """Insert one validated record using an owned connection and bounded lock wait.
 
     A later worker may call this contract with its own path/correlation; it must
@@ -122,24 +211,34 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
         raise ValueError("Only activation records changes")
     if event_id is not None and (action != "webhook.receipt" or type(event_id) is not int or event_id < 1):
         raise ValueError("Invalid audit target")
+    if target_id is not None and target not in {"room", "light"}:
+        raise ValueError("Invalid audit target")
+    if (detail is None) == (action in DETAIL_ACTIONS):
+        raise ValueError("Invalid audit detail")
+    cleaned_detail = clean_detail(action, detail) if detail is not None else None
     record = dict(recorded_at=utc_now(), correlation_id=correlation, source=source,
                   actor_kind=actor, actor_id=ACTOR_IDS.get(actor),
                   actor_verified=ACTOR_VERIFIED.get(actor, 0), action=action,
                   target_kind="event" if event_id is not None else target,
-                  target_id=str(event_id) if event_id is not None else None,
+                  target_id=str(event_id) if event_id is not None else (_label(target_id) if target_id else None),
                   outcome=outcome, reason_code=reason_code, changed_fields=changes)
+    if cleaned_detail is not None:
+        record["detail"] = cleaned_detail  # legacy rows have no detail key, so their checksums stay valid
     record["checksum"] = checksum(record)
     record["changed_fields"] = json.dumps(changes, sort_keys=True, separators=(",", ":"))
+    detail_json = json.dumps(cleaned_detail, sort_keys=True, separators=(",", ":")) if cleaned_detail else None
     # mode=rw prevents accidentally creating a second database after a bad path.
     uri = Path(path).resolve().as_uri() + "?mode=rw"
     with WRITE_LOCK, closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
         conn.executescript(SCHEMA)
+        if "detail" not in {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN detail TEXT")  # table predates light records
         with conn:
             cursor = conn.execute(
                 """INSERT INTO audit_events (
                     recorded_at, correlation_id, source, actor_kind, actor_id, actor_verified,
-                    action, target_kind, target_id, outcome, reason_code, changed_fields, checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                tuple(record.values()),
+                    action, target_kind, target_id, outcome, reason_code, changed_fields, checksum, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tuple(record[key] for key in RECORD_COLUMNS) + (detail_json,),
             )
         return cursor.lastrowid
