@@ -156,7 +156,7 @@ def test_govee_unexpected_error_is_caught(monkeypatch, caplog):
     monkeypatch.setattr(controller, "_try_lan", lambda *a: 1 / 0)
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         controller.apply("dim", GOVEE)
-    assert "unexpected error" in caplog.text
+    assert "unexpected_controller_error" in caplog.text
 
 
 # --- Tuya ----------------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_tuya_unexpected_error_is_caught(monkeypatch, caplog):
     monkeypatch.setattr(controller, "_try_local", lambda *a: 1 / 0)
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         controller.apply("dim", TUYA)
-    assert "unexpected error" in caplog.text
+    assert "unexpected_controller_error" in caplog.text
 
 
 # --- dispatch table and secrets ---------------------------------------------------
@@ -267,7 +267,7 @@ def test_apply_action_routes_by_brand(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         lights.apply_action("dim", [GOVEE, TUYA, {"brand": "hue", "id": "x"}])
     assert seen == [("govee", "dim"), ("tuya", "dim")]
-    assert "no controller for brand=hue" in caplog.text
+    assert "reason=controller_unavailable brand=unknown" in caplog.text
 
 
 def test_load_secrets_reads_file_and_caches(monkeypatch, tmp_path):

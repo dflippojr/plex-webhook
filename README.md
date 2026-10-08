@@ -187,6 +187,33 @@ Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
 and shown on the same Grafana dashboard.
 
+Application-owned failure logs in `app/lights.py` and `app/dispatcher.py`
+use fixed `reason` and `operation` fields:
+
+- `secrets_load_failed`: secret-file read or YAML parsing failed; continue
+  with no local credentials. `secrets_missing` is informational and expected.
+- `discovery_failed`: Govee LAN discovery failed; try cloud fallback.
+- `local_control_failed`: Govee LAN or Tuya local control failed; try cloud.
+- `cloud_control_failed`: the selected brand's cloud request failed.
+- `unexpected_controller_error`: a public controller caught an unexpected failure.
+- `dispatcher_action_failed`: a queued action failed; later actions continue.
+- `control_unavailable`: both transports were unavailable or failed.
+- `controller_unavailable`: no controller supports the configured brand.
+
+Failure diagnostics include fixed brand/transport context, selected fallback,
+and configured device IDs where applicable. Actions are limited to `dim`,
+`restore`, or `unknown`; unknown brands are reported as `unknown`. Free-text
+light names, arbitrary action/brand inputs, configured secret paths, device IPs,
+credentials, exception messages, raw responses, YAML source, and tracebacks
+are omitted. Harmless success logs retain their existing context. Investigate
+configuration and connectivity using the reason/stage and target ID.
+
+This sanitizes these application logging boundaries only. Third-party libraries
+may emit their own logs; their internals and logging configuration are unchanged.
+The existing JSONL and SQLite event history still stores full webhook payloads
+as described above; its retention and secret-safe audit policy is separate work
+tracked in [#48](https://github.com/dflippojr/plex-webhook/issues/48).
+
 ## Tests
 
 An offline pytest suite covers the webhook receiver, the room dispatcher, the

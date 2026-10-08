@@ -54,6 +54,11 @@ SECRETS_PATH = Path(os.environ.get("DEVICES_SECRETS_PATH", "/config/devices.secr
 _secrets_cache = None
 
 
+def diagnostic_action(action: str) -> str:
+    """Only known actions belong in failure diagnostics."""
+    return action if action in ("dim", "restore") else "unknown"
+
+
 def _load_secrets() -> dict:
     """Load config/devices.secrets.yaml, cached after first read.
 
@@ -64,17 +69,16 @@ def _load_secrets() -> dict:
     if _secrets_cache is not None:
         return _secrets_cache
 
-    if not SECRETS_PATH.exists():
-        logger.info("no devices secrets file at %s (no local-control credentials configured yet)", SECRETS_PATH)
-        _secrets_cache = {}
-        return _secrets_cache
-
     try:
+        if not SECRETS_PATH.exists():
+            logger.info("reason=secrets_missing operation=load_secrets fallback=no_local_credentials")
+            _secrets_cache = {}
+            return _secrets_cache
         with SECRETS_PATH.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         _secrets_cache = data.get("devices", {}) or {}
     except Exception:
-        logger.warning("failed to load %s - proceeding with no local-control credentials", SECRETS_PATH, exc_info=True)
+        logger.warning("reason=secrets_load_failed operation=load_secrets fallback=no_local_credentials")
         _secrets_cache = {}
 
     return _secrets_cache
@@ -114,8 +118,8 @@ class GoveeController:
             self._apply(action, light)
         except Exception:
             logger.warning(
-                "govee: unexpected error handling action=%s id=%s name=%s",
-                action, light.get("id"), light.get("name"), exc_info=True,
+                "reason=unexpected_controller_error brand=govee operation=apply action=%s id=%s",
+                diagnostic_action(action), light.get("id"),
             )
 
     def _apply(self, action: str, light: dict):
@@ -132,8 +136,8 @@ class GoveeController:
             return
 
         logger.warning(
-            "govee: could not control light id=%s name=%s via LAN or cloud (no reachable device / no API key configured)",
-            device_id, name,
+            "reason=control_unavailable brand=govee operation=apply id=%s fallback=exhausted (could not control light)",
+            device_id,
         )
 
     def _try_lan(self, light: dict, brightness: int) -> bool:
@@ -151,8 +155,8 @@ class GoveeController:
             self._send_lan_command(ip, {"msg": {"cmd": "turn", "data": {"value": 1}}})
             self._send_lan_command(ip, {"msg": {"cmd": "brightness", "data": {"value": brightness}}})
             return True
-        except Exception as exc:
-            logger.info("govee[lan]: control failed for id=%s ip=%s (%s) - will try cloud fallback", device_id, ip, exc)
+        except Exception:
+            logger.info("reason=local_control_failed brand=govee operation=lan_control id=%s fallback=cloud", device_id)
             return False
 
     def _discover_ip(self, device_id: str) -> str | None:
@@ -183,8 +187,8 @@ class GoveeController:
                 payload = (reply.get("msg") or {}).get("data") or {}
                 if payload.get("device") == device_id and payload.get("ip"):
                     return payload["ip"]
-        except OSError as exc:
-            logger.info("govee[lan]: discovery unavailable (%s)", exc)
+        except OSError:
+            logger.info("reason=discovery_failed brand=govee operation=lan_discovery id=%s fallback=cloud", device_id)
             return None
         finally:
             if sock is not None:
@@ -236,8 +240,8 @@ class GoveeController:
             resp = requests.put(GOVEE_CLOUD_API_URL, headers=headers, json=brightness_body, timeout=5)
             resp.raise_for_status()
             return True
-        except Exception as exc:
-            logger.warning("govee[cloud]: control request failed for id=%s (%s)", device_id, exc)
+        except Exception:
+            logger.warning("reason=cloud_control_failed brand=govee operation=cloud_control id=%s", device_id)
             return False
 
 
@@ -259,8 +263,8 @@ class TuyaController:
             self._apply(action, light)
         except Exception:
             logger.warning(
-                "tuya: unexpected error handling action=%s id=%s name=%s",
-                action, light.get("id"), light.get("name"), exc_info=True,
+                "reason=unexpected_controller_error brand=tuya operation=apply action=%s id=%s",
+                diagnostic_action(action), light.get("id"),
             )
 
     def _apply(self, action: str, light: dict):
@@ -277,8 +281,8 @@ class TuyaController:
             return
 
         logger.warning(
-            "tuya: could not control light id=%s name=%s via local or cloud (no local key configured / no cloud credentials / device unreachable)",
-            device_id, name,
+            "reason=control_unavailable brand=tuya operation=apply id=%s fallback=exhausted (could not control light)",
+            device_id,
         )
 
     def _try_local(self, light: dict, brightness: int) -> bool:
@@ -306,8 +310,8 @@ class TuyaController:
             # scale is 10-1000 on most firmware.
             device.set_value(3, int(brightness * 10))
             return True
-        except Exception as exc:
-            logger.info("tuya[local]: control failed for id=%s ip=%s (%s) - will try cloud fallback", device_id, ip, exc)
+        except Exception:
+            logger.info("reason=local_control_failed brand=tuya operation=local_control id=%s fallback=cloud", device_id)
             return False
 
     def _try_cloud(self, light: dict, brightness: int) -> bool:
@@ -330,8 +334,8 @@ class TuyaController:
             cloud.sendcommand(device_id, [{"code": "switch_1", "value": True}])
             cloud.sendcommand(device_id, [{"code": "bright_value_v2", "value": int(brightness * 10)}])
             return True
-        except Exception as exc:
-            logger.warning("tuya[cloud]: control request failed for id=%s (%s)", device_id, exc)
+        except Exception:
+            logger.warning("reason=cloud_control_failed brand=tuya operation=cloud_control id=%s", device_id)
             return False
 
 
@@ -343,8 +347,8 @@ class NullController:
 
     def apply(self, action: str, light: dict):
         logger.warning(
-            "no controller for brand=%s action=%s id=%s name=%s",
-            light.get("brand"), action, light.get("id"), light.get("name"),
+            "reason=controller_unavailable brand=unknown operation=apply action=%s id=%s",
+            diagnostic_action(action), light.get("id"),
         )
 
 

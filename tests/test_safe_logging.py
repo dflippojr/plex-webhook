@@ -122,7 +122,7 @@ def test_dispatcher_failure_and_later_action(monkeypatch, caplog, failure_stage)
     monkeypatch.setattr(dispatcher.registry, "lights_for", lambda room: [])
     monkeypatch.setattr(lights, "apply_action", lambda *a: None)
     target, attribute = (dispatcher.registry, "lights_for") if failure_stage == "lookup" else (lights, "apply_action")
-    with monkeypatch.context() as patch:
+    with caplog.at_level(logging.INFO, logger="plex-webhook"), monkeypatch.context() as patch:
         patch.setattr(target, attribute, fail(sentinel))
         dispatcher._dispatch("private-room-input", "private-action").result(timeout=5)
     assert_safe(caplog, sentinel, "private-room-input", "private-action")
