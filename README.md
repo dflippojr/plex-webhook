@@ -67,6 +67,26 @@ table) and exposed as Prometheus metrics (`plex_webhook_events_total`,
 `observability-stack` Prometheus and shown on the "Plex Webhook" Grafana
 dashboard in the "Basement PC" folder.
 
+On first open, existing databases automatically gain two indexes for normalized
+counter seeding and client discovery. Index creation adds startup work once;
+subsequent opens reuse them, and all existing event history is retained. These
+queries still scale with history. On a synthetic 100,000-event Windows fixture,
+the indexes added 7,442,432 bytes (5.21%) and first open took about 476 ms.
+Maintaining them also adds write work: the measured individually committed insert
+median rose from 4.229 to 4.344 ms, with disk/cache variance affecting timings.
+
+Reproduce read medians (one warmup, seven trials), query plans, database sizes,
+first/second-open costs and 300 per-event commit samples with:
+
+```bash
+python -m scripts.benchmark_sqlite_indexes
+```
+
+The benchmark imports only `app.db`, creates synthetic 10k/100k histories with
+1,024-byte raw payloads in system temp, and cleans up afterwards. It accepts no
+existing database path and never starts the app. Results vary by environment;
+CI checks correctness and query plans without timing thresholds.
+
 ## Phase 3 — room-based light dispatcher
 
 Copy `config/rooms.yaml.example` to `config/rooms.yaml` (gitignored — it
