@@ -1,16 +1,22 @@
 version: 2
 updates:
   - package-ecosystem: pip
+    assignees:
+      - dflippojr
     directory: /
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
+    assignees:
+      - dflippojr
     directory: /
     schedule:
       interval: weekly
 
   - package-ecosystem: github-actions
+    assignees:
+      - dflippojr
     directory: /
     schedule:
       interval: weekly
