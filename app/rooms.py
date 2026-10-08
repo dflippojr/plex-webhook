@@ -132,10 +132,12 @@ class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
         self._state = ({}, {}, {})
+        self.load_outcome, self.load_reason = "rejected", "config_unavailable"
         try:
             self.reload()
         except RoomConfigError as exc:
-            logger.error("Invalid startup rooms config: %s", exc.detail)
+            self.load_reason = "invalid_config"
+            logger.error("Invalid startup rooms config: %s", [error["code"] for error in exc.detail])
         except RoomConfigUnavailable:
             logger.warning("Rooms config unavailable; dispatcher disabled until a valid reload")
 
@@ -165,6 +167,7 @@ class RoomRegistry:
         candidate = self.validate()
         # One reference publishes the rooms and both indexes together.
         self._state = candidate
+        self.load_outcome, self.load_reason = "activated", "loaded"
         logger.info("loaded %d room(s)", len(self.rooms))
 
     def resolve_room(self, payload: dict) -> str | None:
