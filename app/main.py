@@ -5,11 +5,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import threading
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
-from app import audit, dispatcher
+from app import audit, auth, dispatcher
 from app.db import event_counts, get_connection, insert_event, last_received_at, list_known_clients
 from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
@@ -36,6 +38,40 @@ LAST_EVENT_TIMESTAMP = Gauge(
 # Reuse the collector on module reload (tests reload main for counter seeding).
 if "AUDIT_FAILURES_TOTAL" not in globals():
     AUDIT_FAILURES_TOTAL = Counter("plex_webhook_audit_write_failures_total", "Audit records lost to write failures")
+if "ADMIN_DENIALS_TOTAL" not in globals():
+    ADMIN_DENIALS_TOTAL = Counter("plex_webhook_admin_denials_total", "Denied admin requests", ["reason"])
+for _reason in auth.DENIAL_REASONS:
+    ADMIN_DENIALS_TOTAL.labels(reason=_reason)
+
+# Denied-request audit rows are capped per window so a flood of bad calls cannot
+# grow the trail unbounded; every denial is still counted in the metric above.
+DENIAL_AUDIT_LIMIT, DENIAL_AUDIT_WINDOW = 20, 60.0
+_denial_window = {"start": 0.0, "count": 0}
+_denial_lock = threading.Lock()
+
+
+def _denial_audit_allowed():
+    now = time.monotonic()
+    with _denial_lock:
+        if now - _denial_window["start"] >= DENIAL_AUDIT_WINDOW:
+            _denial_window.update(start=now, count=0)
+        _denial_window["count"] += 1
+        return _denial_window["count"] <= DENIAL_AUDIT_LIMIT
+
+
+def _require_admin(request, action):
+    """Raise 401/503 unless the request carries the configured admin token."""
+    reason = auth.denial_reason(request.headers.get("authorization"))
+    if reason is None:
+        return
+    ADMIN_DENIALS_TOTAL.labels(reason=reason).inc()
+    logger.warning("reason=admin_denied code=%s", reason)
+    if _denial_audit_allowed():
+        _record_audit(action=action, outcome="denied", reason_code=reason, correlation=audit.correlation_id())
+    if reason == "auth_unconfigured":
+        raise HTTPException(status_code=503, detail="Admin authentication unavailable")
+    raise HTTPException(status_code=401, detail="Admin credential required",
+                        headers={"WWW-Authenticate": "Bearer"})
 
 
 def _record_audit(**fields):
@@ -74,23 +110,26 @@ async def metrics():
 
 
 @app.get("/clients")
-async def clients():
+async def clients(request: Request):
+    _require_admin(request, "clients.read")
     """Distinct Plex clients seen so far, to help fill in the local config/rooms.yaml."""
     return {"clients": list_known_clients(db_conn)}
 
 
 @app.get("/rooms")
-async def rooms():
+async def rooms(request: Request):
+    _require_admin(request, "rooms.read")
     return {"rooms": registry.rooms}
 
 
 @app.post("/rooms/reload")
-async def reload_rooms():
+async def reload_rooms(request: Request):
+    _require_admin(request, "rooms.reload")
     before = registry.rooms
     correlation = audit.correlation_id()
     _room_config_operation(registry.reload, "rooms.reload", correlation)
     _record_audit(action="rooms.reload", outcome="activated", reason_code="loaded", correlation=correlation,
-                  changed_fields=audit.configuration_changes(before, registry.rooms))
+                  changed_fields=audit.configuration_changes(before, registry.rooms), admin=True)
     dispatcher.init_room_gauges()
     return {"status": "reloaded", "rooms": list(registry.rooms.keys())}
 
@@ -99,18 +138,19 @@ def _room_config_operation(operation, action, correlation):
     try:
         return operation()
     except RoomConfigError as exc:
-        _record_audit(action=action, outcome="rejected", reason_code="invalid_config", correlation=correlation)
+        _record_audit(action=action, outcome="rejected", reason_code="invalid_config", correlation=correlation, admin=True)
         raise HTTPException(status_code=422, detail=exc.detail) from None
     except RoomConfigUnavailable:
-        _record_audit(action=action, outcome="rejected", reason_code="config_unavailable", correlation=correlation)
+        _record_audit(action=action, outcome="rejected", reason_code="config_unavailable", correlation=correlation, admin=True)
         raise HTTPException(status_code=503, detail="Rooms configuration unavailable") from None
 
 
 @app.post("/rooms/validate")
-async def validate_rooms():
+async def validate_rooms(request: Request):
+    _require_admin(request, "rooms.validate")
     correlation = audit.correlation_id()
     candidate, _, _ = _room_config_operation(registry.validate, "rooms.validate", correlation)
-    _record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation=correlation)
+    _record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation=correlation, admin=True)
     return {"status": "valid", "rooms": list(candidate)}
 
 

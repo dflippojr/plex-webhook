@@ -27,7 +27,7 @@ def test_rejected_receipts_still_capture(client, body, code):
     record = rows(client)[0]
     assert record["action"] == "webhook.receipt"
     assert record["outcome"] == "rejected" and record["reason_code"] == code
-    assert record["actor_kind"] == "anonymous" and record["actor_id"] is None
+    assert record["actor_kind"] == "plex_server" and record["actor_id"] == "plex-server"
     assert record["actor_verified"] == 0 and record["source"] == "webhook"
     assert record["target_kind"] == "event" and record["target_id"] == "1"
     if body is not None and code != "invalid_json":
