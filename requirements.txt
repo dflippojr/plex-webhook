@@ -1,7 +1,7 @@
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-prometheus-client==0.20.0
+prometheus-client==0.26.0
 pyyaml==6.0.3
 requests==2.32.3
 tinytuya==1.15.0
