@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app import audit, audit_cli, db
+from conftest import records
 
 
 @pytest.fixture
@@ -24,12 +25,6 @@ def receipt(path, **kwargs):
                   correlation=audit.correlation_id())
     fields.update(kwargs)
     return audit.append(path, **fields)
-
-
-def records(path):
-    with audit_cli.open_database(path) as conn:
-        args = audit_cli.parser().parse_args(["--db", str(path), "export", "--limit", "10000"])
-        return list(audit_cli.read_records(conn, args))
 
 
 def test_migration_reopen_checksums_and_legacy_preserved(audit_db):

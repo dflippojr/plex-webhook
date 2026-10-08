@@ -1,4 +1,5 @@
 """Shared fixtures: fake data only, no network, no /data or /config on the host."""
+import json
 import os
 import socket
 import sqlite3
@@ -155,3 +156,20 @@ def drain():
     from app import dispatcher
 
     dispatcher._action_executor.submit(lambda: None).result(timeout=30)
+
+
+def post(client, body):
+    return client.post("/webhook", data={"payload": json.dumps(body)})
+
+
+def records(path):
+    from app import audit_cli
+
+    with audit_cli.open_database(path) as conn:
+        args = audit_cli.parser().parse_args(["--db", str(path), "export", "--limit", "10000"])
+        return list(audit_cli.read_records(conn, args))
+
+
+def rows(client):
+    path = client.conn.execute("PRAGMA database_list").fetchone()[2]
+    return records(path)
