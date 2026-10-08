@@ -145,14 +145,6 @@ class RoomRegistry:
     def rooms(self):
         return self._state[0]
 
-    @property
-    def _uuid_index(self):
-        return self._state[1]
-
-    @property
-    def _title_index(self):
-        return self._state[2]
-
     def validate(self):
         """Read and validate the configured file without publishing any state."""
         try:

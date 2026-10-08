@@ -42,36 +42,32 @@ def get_connection():
 
 def insert_event(conn, received_at, event, payload, raw_payload_json):
     with WRITE_LOCK:
-        return _insert_event(conn, received_at, event, payload, raw_payload_json)
+        metadata = (payload or {}).get("Metadata") or {}
+        account = (payload or {}).get("Account") or {}
+        player = (payload or {}).get("Player") or {}
 
-
-def _insert_event(conn, received_at, event, payload, raw_payload_json):
-    metadata = (payload or {}).get("Metadata") or {}
-    account = (payload or {}).get("Account") or {}
-    player = (payload or {}).get("Player") or {}
-
-    cursor = conn.execute(
-        """
-        INSERT INTO events (
-            received_at, event, account_title, player_title, player_uuid,
-            media_type, title, grandparent_title, rating_key, raw_payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            received_at,
-            event,
-            account.get("title"),
-            player.get("title"),
-            player.get("uuid"),
-            metadata.get("type"),
-            metadata.get("title"),
-            metadata.get("grandparentTitle"),
-            metadata.get("ratingKey"),
-            raw_payload_json,
-        ),
-    )
-    conn.commit()
-    return cursor.lastrowid
+        cursor = conn.execute(
+            """
+            INSERT INTO events (
+                received_at, event, account_title, player_title, player_uuid,
+                media_type, title, grandparent_title, rating_key, raw_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                received_at,
+                event,
+                account.get("title"),
+                player.get("title"),
+                player.get("uuid"),
+                metadata.get("type"),
+                metadata.get("title"),
+                metadata.get("grandparentTitle"),
+                metadata.get("ratingKey"),
+                raw_payload_json,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid
 
 
 def last_received_at(conn):
