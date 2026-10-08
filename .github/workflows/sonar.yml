@@ -62,7 +62,7 @@ jobs:
           # Full history so SonarCloud can blame lines and find the PR base.
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: env.SONAR_TOKEN != ''
         with:
           name: coverage
