@@ -50,8 +50,44 @@ http://127.0.0.1:9800/webhook
   captured events, with event count and last-seen time. Use this to find
   the exact identifiers to put in your local `config/rooms.yaml`.
 - `GET /rooms` — the currently loaded room config.
+- `POST /rooms/validate` — check the configured room file without activating it.
 - `POST /rooms/reload` — reload `config/rooms.yaml` without restarting the
   container (edits to the file otherwise only take effect on restart).
+
+Both room operations read the same file (`ROOMS_CONFIG_PATH`, default
+`/config/rooms.yaml`). Validation returns HTTP 200 with
+`{"status":"valid","rooms":["living_room","bedroom"]}`; reload retains
+`{"status":"reloaded","rooms":["living_room","bedroom"]}`. Validation never
+changes the active mapping, playback state, gauges, or lights. Reload publishes
+the mapping only after the entire candidate succeeds; it does not reconcile
+already active playback after a remapping.
+
+Invalid YAML or schema returns HTTP 422, for example:
+
+```json
+{"detail":[{"path":"rooms.den.plex_clients[0]","code":"expected_mapping"}]}
+```
+
+Paths identify the field to fix (`$` means the document root). Codes include
+`invalid_yaml`, `recursive_yaml`, `duplicate_key`, `expected_mapping`,
+`expected_list`, `expected_string`, `expected_string_or_null`, and
+`expected_nonempty_string`. `conflicting_client` reports both entries when a
+UUID or a trimmed, lowercase nonempty title belongs to different rooms.
+Repeated identifiers within a single room are allowed; UUID matches take
+precedence over titles. Errors omit client identifiers, light values, YAML
+source fragments, and filesystem details.
+
+The root, `rooms`, and each room must be mappings. When present, `plex_clients`
+and `lights` must be lists of mappings. Client UUID/title and optional light
+name/model accept strings or null; light brand/id require nonempty strings.
+Extra fields and unknown light brands are preserved. Empty files, omitted
+`rooms`, and `rooms: {}` are valid empty configurations.
+
+A missing or unreadable file returns HTTP 503 with
+`{"detail":"Rooms configuration unavailable"}`. Every failed validate/reload
+preserves the last valid mapping and dispatcher state. Invalid startup config
+logs a sanitized error and starts with empty mappings, keeping raw webhook
+capture available; a missing startup file also leaves dispatch disabled.
 
 ## Phase 1 — raw event capture
 
@@ -88,7 +124,15 @@ rooms:
 
 Workflow to fill it in: play something on the target device, hit
 `GET /clients` to read off its real `title`/`uuid`, add it under the right
-room in the local `config/rooms.yaml`, then `POST /rooms/reload`. Do not
+room in the local `config/rooms.yaml`, then validate and reload:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:9800/rooms/validate
+# Only after validation returns 200 with status "valid":
+curl.exe -X POST http://127.0.0.1:9800/rooms/reload
+```
+
+Fix any reported errors and validate again before reloading. Do not
 commit that file.
 
 Dispatch logic (`app/dispatcher.py`): a room tracks the set of clients

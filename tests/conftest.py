@@ -78,7 +78,7 @@ def registry(rooms_file):
     reg.reload()
     yield reg
     reg.config_path = Path(os.environ["ROOMS_CONFIG_PATH"])
-    reg.reload()
+    reg._state = ({}, {}, {})
 
 
 @pytest.fixture

@@ -100,6 +100,97 @@ def test_rooms_and_reload(client, rooms_file):
     assert list(client.get("/rooms").json()["rooms"]) == ["den"]
 
 
+def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, monkeypatch, light_calls):
+    from app import dispatcher
+
+    post(client, payload("media.play", uuid="uuid-living"))
+    drain()
+    before = registry._state
+    active = {key: set(value) for key, value in dispatcher._active_clients.items()}
+    metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
+    calls = list(light_calls)
+    def unexpected():
+        pytest.fail("validation must not initialize gauges")
+    original_init = dispatcher.init_room_gauges
+    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    rooms_file.write_text("rooms: {den: {}}", encoding="utf-8")
+    assert client.post("/rooms/validate").json() == {"status": "valid", "rooms": ["den"]}
+    assert registry._state is before
+    assert dispatcher._active_clients == active
+    assert list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples == metrics
+    assert light_calls == calls
+    monkeypatch.setattr(dispatcher, "init_room_gauges", original_init)
+    assert client.post("/rooms/reload").json() == {"status": "reloaded", "rooms": ["den"]}
+
+
+@pytest.mark.parametrize("endpoint", ["validate", "reload"])
+@pytest.mark.parametrize("source", [
+    "rooms: [private-value", "rooms: {den: {plex_clients: [42]}}",
+    "rooms: {den: {}, den: {}}",
+    "rooms: {a: {plex_clients: [{uuid: private-value}]}, b: {plex_clients: [{uuid: private-value}]}}",
+    "rooms: {a: {plex_clients: [{title: Private-Value}]}, b: {plex_clients: [{title: ' private-value '}]}}",
+])
+def test_invalid_room_endpoints_preserve_dispatch(client, registry, rooms_file, light_calls, monkeypatch, endpoint, source):
+    from app import dispatcher
+
+    post(client, payload("media.play", uuid="uuid-living"))
+    drain()
+    before = registry._state
+    active = {key: set(value) for key, value in dispatcher._active_clients.items()}
+    metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
+    calls = list(light_calls)
+    def unexpected():
+        pytest.fail("failed candidates must not initialize gauges")
+    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    rooms_file.write_text(source, encoding="utf-8")
+    resp = client.post(f"/rooms/{endpoint}")
+    assert resp.status_code == 422
+    assert all(set(error) == {"path", "code"} for error in resp.json()["detail"])
+    assert "private-value" not in resp.text.lower()
+    assert registry._state is before
+    assert dispatcher._active_clients == active
+    assert list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples == metrics
+    assert light_calls == calls
+    post(client, payload("media.stop", uuid="uuid-living"))
+    drain()
+    assert light_calls[-1] == ("restore", ["AA:BB"])
+
+
+@pytest.mark.parametrize("endpoint", ["validate", "reload"])
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
+def test_unavailable_room_endpoints(client, registry, monkeypatch, endpoint, failure):
+    from pathlib import Path
+    from app import dispatcher
+
+    before = registry._state
+    def fail(*args, **kwargs):
+        raise failure("private-value")
+    def unexpected():
+        pytest.fail("unavailable config must not initialize gauges")
+    monkeypatch.setattr(Path, "read_text", fail)
+    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    resp = client.post(f"/rooms/{endpoint}")
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "Rooms configuration unavailable"}
+    assert registry._state is before
+
+
+def test_invalid_startup_still_captures_webhook(client, rooms_file, monkeypatch, light_calls):
+    from app import dispatcher
+    import app.main as main
+    from app.rooms import RoomRegistry
+
+    rooms_file.write_text("rooms: [private-value", encoding="utf-8")
+    startup = RoomRegistry(rooms_file)
+    monkeypatch.setattr(main, "registry", startup)
+    monkeypatch.setattr(dispatcher, "registry", startup)
+    assert post(client, payload("media.play")).status_code == 200
+    assert json.loads(client.log.read_text().splitlines()[0])["event"] == "media.play"
+    assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    drain()
+    assert light_calls == []
+
+
 def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypatch):
     import app.db
     import app.main as main

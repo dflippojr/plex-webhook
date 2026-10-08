@@ -5,13 +5,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import dispatcher
 from app.db import event_counts, get_connection, insert_event, last_received_at, list_known_clients
-from app.rooms import registry
+from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
 app = FastAPI(title="plex-webhook")
 
@@ -66,9 +66,24 @@ async def rooms():
 
 @app.post("/rooms/reload")
 async def reload_rooms():
-    registry.reload()
+    _room_config_operation(registry.reload)
     dispatcher.init_room_gauges()
     return {"status": "reloaded", "rooms": list(registry.rooms.keys())}
+
+
+def _room_config_operation(operation):
+    try:
+        return operation()
+    except RoomConfigError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from None
+    except RoomConfigUnavailable:
+        raise HTTPException(status_code=503, detail="Rooms configuration unavailable") from None
+
+
+@app.post("/rooms/validate")
+async def validate_rooms():
+    candidate, _, _ = _room_config_operation(registry.validate)
+    return {"status": "valid", "rooms": list(candidate)}
 
 
 @app.post("/webhook")
