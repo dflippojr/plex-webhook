@@ -84,9 +84,9 @@ def _dispatch(room_key: str, action: str):
 def _apply(room_key: str, action: str):
     try:
         room_lights = registry.lights_for(room_key)
-        logger.info("room=%s action=%s lights=%d", room_key, action, len(room_lights))
         lights.apply_action(action, room_lights)
+        logger.info("room=%s action=%s lights=%d", room_key, action, len(room_lights))
     except Exception:
-        logger.exception("room=%s action=%s failed", room_key, action)
+        logger.error("reason=dispatcher_action_failed operation=apply action=%s", lights.diagnostic_action(action))
         return
     DISPATCH_ACTIONS_TOTAL.labels(room=room_key, action=action).inc()
