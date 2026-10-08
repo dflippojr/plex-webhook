@@ -43,7 +43,7 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
     account = (payload or {}).get("Account") or {}
     player = (payload or {}).get("Player") or {}
 
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO events (
             received_at, event, account_title, player_title, player_uuid,
@@ -64,6 +64,7 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
         ),
     )
     conn.commit()
+    return cursor.lastrowid
 
 
 def last_received_at(conn):
