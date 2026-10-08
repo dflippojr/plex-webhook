@@ -124,11 +124,13 @@ async def plex_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid webhook form") from None
 
     payload = None
+    decoded_payload = None
     reason = "missing_payload"
     payload_raw = form.get("payload")
     if payload_raw is not None:
         try:
             payload = json.loads(payload_raw)
+            decoded_payload = payload
             reason = "accepted" if _valid_payload(payload) else "invalid_payload"
         except (ValueError, TypeError):
             reason = "invalid_json"
@@ -148,7 +150,7 @@ async def plex_webhook(request: Request):
     record = {
         "received_at": received_at,
         "event": event_type,
-        "payload": payload,
+        "payload": decoded_payload,
         "attachments": attachments,
     }
 
@@ -156,12 +158,12 @@ async def plex_webhook(request: Request):
     with EVENT_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
-    event_id = insert_event(db_conn, received_at, event_type, payload, json.dumps(payload))
+    event_id = insert_event(db_conn, received_at, event_type, payload, json.dumps(decoded_payload))
     _record_audit(action="webhook.receipt", outcome="received" if reason == "accepted" else "rejected",
                   reason_code=reason, correlation=correlation, event_id=event_id)
 
-    account_title = (payload or {}).get("Account", {}).get("title") or "unknown"
-    player_title = (payload or {}).get("Player", {}).get("title") or "unknown"
+    account_title = ((payload or {}).get("Account") or {}).get("title") or "unknown"
+    player_title = ((payload or {}).get("Player") or {}).get("title") or "unknown"
     EVENTS_TOTAL.labels(event=event_type or "unknown", player=player_title, account=account_title).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
 
@@ -175,11 +177,14 @@ def _valid_payload(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("event"), str):
         return False
     # Reject shapes that would otherwise raise during raw capture/dispatch.
-    for group, names in (("Account", ("title",)), ("Player", ("uuid", "title")),
-                         ("Metadata", ("type", "title", "grandparentTitle", "ratingKey"))):
+    for group, names in (("Account", ("title",)), ("Player", ("uuid", "title")), ("Metadata", ())):
         fields = payload.get(group)
         if fields is not None and not isinstance(fields, dict):
             return False
         if fields and any(fields.get(name) is not None and not isinstance(fields[name], str) for name in names):
+            return False
+    metadata = payload.get("Metadata") or {}
+    for name in ("type", "title", "grandparentTitle", "ratingKey"):
+        if metadata.get(name) is not None and not isinstance(metadata[name], (str, int, float)):
             return False
     return True

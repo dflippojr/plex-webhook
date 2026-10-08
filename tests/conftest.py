@@ -114,6 +114,25 @@ def memory_db():
     conn.close()
 
 
+@pytest.fixture
+def client(tmp_path, monkeypatch, registry, light_calls):
+    from fastapi.testclient import TestClient
+    import app.db
+    import app.main as main
+
+    # TestClient runs handlers in another thread; production audit writers own
+    # their connections instead of sharing this legacy test connection.
+    conn = sqlite3.connect(tmp_path / "events.db", check_same_thread=False)
+    conn.executescript(app.db.SCHEMA)
+    monkeypatch.setattr(main, "db_conn", conn)
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "EVENT_LOG", tmp_path / "events.jsonl")
+    with TestClient(main.app) as c:
+        c.conn, c.log = conn, tmp_path / "events.jsonl"
+        yield c
+    conn.close()
+
+
 def payload(event, title="Living Room TV", uuid=None, account="dan"):
     return {
         "event": event,

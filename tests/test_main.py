@@ -3,27 +3,9 @@ import json
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from conftest import drain, payload
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch, registry, light_calls):
-    import app.db
-    import app.main as main
-
-    # TestClient runs handlers in another thread, so use a cross-thread connection.
-    conn = sqlite3.connect(tmp_path / "events.db", check_same_thread=False)
-    conn.executescript(app.db.SCHEMA)
-    monkeypatch.setattr(main, "db_conn", conn)
-    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(main, "EVENT_LOG", tmp_path / "events.jsonl")
-    with TestClient(main.app) as c:
-        c.conn, c.log = conn, tmp_path / "events.jsonl"
-        yield c
-    conn.close()
 
 
 def post(client, body):

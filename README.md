@@ -211,8 +211,10 @@ configuration and connectivity using the reason/stage and target ID.
 This sanitizes these application logging boundaries only. Third-party libraries
 may emit their own logs; their internals and logging configuration are unchanged.
 The existing JSONL and SQLite event history still stores full webhook payloads
-as described above; its retention and secret-safe audit policy is separate work
-tracked in [#48](https://github.com/dflippojr/plex-webhook/issues/48).
+as described above. The separate [owner audit trail](docs/audit.md) records safe
+webhook receipts and configuration observations in SQLite, with an offline
+review/export CLI, explicit 90-day retention and backup/restore instructions.
+Audit failures warn and increment a counter while webhooks/reloads continue.
 
 ## Tests
 

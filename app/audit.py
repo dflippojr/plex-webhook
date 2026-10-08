@@ -9,6 +9,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from uuid import UUID, uuid4
 
 SCHEMA = """
@@ -51,6 +52,7 @@ OPERATIONS = {
     }),
 }
 CHANGE_PATHS = {"rooms", "rooms.count", "rooms.plex_clients", "rooms.lights", "rooms.other"}
+WRITE_LOCK = RLock()
 
 
 def utc_now():
@@ -115,7 +117,7 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     record["changed_fields"] = json.dumps(changes, sort_keys=True, separators=(",", ":"))
     # mode=rw prevents accidentally creating a second database after a bad path.
     uri = Path(path).resolve().as_uri() + "?mode=rw"
-    with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
+    with WRITE_LOCK, closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
         conn.executescript(SCHEMA)
         with conn:
             cursor = conn.execute(

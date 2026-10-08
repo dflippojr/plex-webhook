@@ -2,6 +2,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from app.audit import WRITE_LOCK
+
 DB_PATH = Path(os.environ.get("DB_PATH", "/data/plex_events.db"))
 
 SCHEMA = """
@@ -39,6 +41,11 @@ def get_connection():
 
 
 def insert_event(conn, received_at, event, payload, raw_payload_json):
+    with WRITE_LOCK:
+        return _insert_event(conn, received_at, event, payload, raw_payload_json)
+
+
+def _insert_event(conn, received_at, event, payload, raw_payload_json):
     metadata = (payload or {}).get("Metadata") or {}
     account = (payload or {}).get("Account") or {}
     player = (payload or {}).get("Player") or {}

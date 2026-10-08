@@ -137,7 +137,7 @@ class RoomRegistry:
             self.reload()
         except RoomConfigError as exc:
             self.load_reason = "invalid_config"
-            logger.error("Invalid startup rooms config: %s", exc.detail)
+            logger.error("Invalid startup rooms config: %s", [error["code"] for error in exc.detail])
         except RoomConfigUnavailable:
             logger.warning("Rooms config unavailable; dispatcher disabled until a valid reload")
 
