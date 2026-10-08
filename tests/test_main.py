@@ -5,11 +5,7 @@ import sqlite3
 import pytest
 from prometheus_client import REGISTRY
 
-from conftest import drain, payload
-
-
-def post(client, body):
-    return client.post("/webhook", data={"payload": json.dumps(body)})
+from conftest import drain, payload, post
 
 
 def test_health(client):

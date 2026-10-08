@@ -6,14 +6,7 @@ import pytest
 from prometheus_client import REGISTRY
 
 from app import audit
-from conftest import drain, payload
-from test_audit import records
-from test_main import post
-
-
-def rows(client):
-    path = client.conn.execute("PRAGMA database_list").fetchone()[2]
-    return records(path)
+from conftest import drain, payload, post, records, rows
 
 
 @pytest.mark.parametrize("body,code", [

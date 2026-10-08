@@ -3,18 +3,11 @@ import json
 import pytest
 from prometheus_client import generate_latest
 
-from conftest import ADMIN_TOKEN, drain, payload
-from test_audit import records
-from test_audit_http import rows
+from conftest import ADMIN_TOKEN, drain, payload, rows
 
 ROUTES = [("get", "/rooms", "rooms.read"), ("get", "/clients", "clients.read"),
           ("post", "/rooms/validate", "rooms.validate"), ("post", "/rooms/reload", "rooms.reload")]
 SENTINEL = "SENTINEL-attempted-credential"
-
-
-def call(client, method, path, headers=None):
-    return client.request(method, path, headers=headers or {}) if not headers else \
-        client.request(method, path, headers=headers)
 
 
 @pytest.fixture
