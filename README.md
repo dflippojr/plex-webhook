@@ -11,7 +11,8 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
 
 The next planned steps are those three hardware checks; they need the owner's devices
-and accounts. Other open issues (for example #13, #17, #19) cover deployment and repo upkeep.
+and accounts. Other open issues (for example #13, #42, #49) cover deployment, per-room
+brightness and light-action audit correlation.
 
 ## Run
 
@@ -173,13 +174,13 @@ rooms:
 ```
 
 Workflow to fill it in: play something on the target device, hit
-`GET /clients` to read off its real `title`/`uuid`, add it under the right
+`GET /clients` (admin token) to read off its real `title`/`uuid`, add it under the right
 room in the local `config/rooms.yaml`, then validate and reload:
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:9800/rooms/validate
+curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/validate
 # Only after validation returns 200 with status "valid":
-curl.exe -X POST http://127.0.0.1:9800/rooms/reload
+curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
 ```
 
 Fix any reported errors and validate again before reloading. Do not
