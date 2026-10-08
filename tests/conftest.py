@@ -114,6 +114,9 @@ def memory_db():
     conn.close()
 
 
+ADMIN_TOKEN = "synthetic-admin-token-0123456789"
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch, registry, light_calls):
     from fastapi.testclient import TestClient
@@ -124,10 +127,15 @@ def client(tmp_path, monkeypatch, registry, light_calls):
     # their connections instead of sharing this legacy test connection.
     conn = sqlite3.connect(tmp_path / "events.db", check_same_thread=False)
     conn.executescript(app.db.SCHEMA)
+    monkeypatch.setenv("ADMIN_API_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setitem(main._denial_window, "start", 0.0)
+    monkeypatch.setitem(main._denial_window, "count", 0)
     monkeypatch.setattr(main, "db_conn", conn)
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main, "EVENT_LOG", tmp_path / "events.jsonl")
     with TestClient(main.app) as c:
+        c.admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+        c.headers.update(c.admin)  # webhook posts ignore it; admin routes need it
         c.conn, c.log = conn, tmp_path / "events.jsonl"
         yield c
     conn.close()

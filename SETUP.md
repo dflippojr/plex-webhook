@@ -93,9 +93,18 @@ wizard) and update `config/devices.secrets.yaml`.
 This part is unchanged from the original Phase 3 workflow - see the
 "Phase 3" section of `README.md`: copy `config/rooms.yaml.example` to
 `config/rooms.yaml` if needed, play something on the target device,
-hit `GET /clients` to read off its real Plex `title`/`uuid`, fill in
+hit `GET /clients` (send `Authorization: Bearer <ADMIN_API_TOKEN>`) to read off its real Plex `title`/`uuid`, fill in
 the local `config/rooms.yaml`, then `POST /rooms/reload`. Do not commit
 `rooms.yaml`.
+
+## 4b. Admin API token
+
+Set `ADMIN_API_TOKEN` in `.env` (16+ characters, e.g.
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`). It guards
+`/rooms`, `/clients`, `/rooms/validate` and `/rooms/reload`; until it is set
+those routes return 503. Rotate by editing `.env` and redeploying (step 5).
+Never reuse Govee/Tuya keys. The token identifies the client `owner-admin`, not
+a person; see README "Route permissions".
 
 ## 5. Restart with real credentials
 

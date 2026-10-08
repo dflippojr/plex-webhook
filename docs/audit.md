@@ -20,9 +20,14 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
 - `rooms.validate`: `validated/valid` or a rejected validation; never records
   configuration changes or activates state.
 - `service.config_load`: the startup load result, including failure with an
-  empty mapping. Its actor is the system. Reload/validation callers and webhook
-  senders are anonymous and unverified. There is no authentication on these
-  endpoints, so a receipt cannot establish that Plex sent it. Plex account/client
+  empty mapping. Its actor is the system. Reload/validation by a valid admin token
+  records actor `admin_token`/`owner-admin`, verified (a shared client
+  credential, not a person). Webhook receipts record `plex_server`/`plex-server`,
+  unverified: the webhook is unauthenticated, so a receipt cannot establish that
+  Plex sent it. Denied calls are `outcome=denied` with reason `missing_credential`,
+  `invalid_credential` or `auth_unconfigured`, an anonymous actor, on
+  `rooms.reload`, `rooms.validate`, `rooms.read` and `clients.read`; at most 20
+  such rows per minute are written (all are counted in a metric). Plex account/client
   identifiers are payload claims and are omitted from this v1 trail.
 
 Each operation gets a server-generated correlation UUID; client headers cannot

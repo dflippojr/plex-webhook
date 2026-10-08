@@ -43,16 +43,46 @@ http://127.0.0.1:9800/webhook
 
 ## Endpoints
 
-- `POST /webhook` — Plex webhook target.
-- `GET /health` — liveness check.
-- `GET /metrics` — Prometheus metrics.
-- `GET /clients` — every distinct Plex client (`title` + `uuid`) seen in
+- `POST /webhook` — Plex webhook target (unauthenticated; see Route permissions).
+- `GET /health` — liveness check (public).
+- `GET /metrics` — Prometheus metrics (public, for monitoring).
+- `GET /clients` (admin token) — every distinct Plex client (`title` + `uuid`) seen in
   captured events, with event count and last-seen time. Use this to find
   the exact identifiers to put in your local `config/rooms.yaml`.
-- `GET /rooms` — the currently loaded room config.
-- `POST /rooms/validate` — check the configured room file without activating it.
-- `POST /rooms/reload` — reload `config/rooms.yaml` without restarting the
+- `GET /rooms` (admin token) — the currently loaded room config.
+- `POST /rooms/validate` (admin token) — check the configured room file without activating it.
+- `POST /rooms/reload` (admin token) — reload `config/rooms.yaml` without restarting the
   container (edits to the file otherwise only take effect on restart).
+
+### Route permissions
+
+| Route | Access | Audit actor |
+| --- | --- | --- |
+| `GET /health`, `GET /metrics` | public | none |
+| `POST /webhook` | unauthenticated (Plex cannot be assumed to send credentials) | `plex-server`, unverified |
+| `GET /rooms`, `GET /clients`, `POST /rooms/validate`, `POST /rooms/reload` | `Authorization: Bearer <ADMIN_API_TOKEN>` | `owner-admin`, verified |
+
+Missing or wrong credentials return 401; an unset or shorter-than-16-character
+`ADMIN_API_TOKEN` fails closed with 503 `{"detail":"Admin authentication
+unavailable"}`. The token is only read from the environment, compared in
+constant time, and never logged or audited. Example:
+
+```powershell
+curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
+```
+
+What this establishes: the caller holds the shared secret (`owner-admin` is a
+client identity, not a named person). Request-supplied actor headers,
+`X-Forwarded-*` and Plex `Account.title`/`Player` fields are never used for
+identity; `plex-server` is a label for the unauthenticated webhook route and
+proves nothing about who sent it (any local process can post). Webhooks stay
+unauthenticated until a Plex-compatible mechanism is chosen. Denied requests
+are counted in `plex_webhook_admin_denials_total{reason}` and audited with
+fixed reason codes (`missing_credential`, `invalid_credential`,
+`auth_unconfigured`), capped at 20 audit rows per minute; no attempted token,
+header, IP or body is stored. `/metrics` labels (`player`, `account`) still
+include Plex-supplied names. Rotation: change `ADMIN_API_TOKEN` in `.env` and
+redeploy; there is no live rotation.
 
 Both room operations read the same file (`ROOMS_CONFIG_PATH`, default
 `/config/rooms.yaml`). Validation returns HTTP 200 with

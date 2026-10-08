@@ -36,17 +36,26 @@ CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, id);
 
 # Only fixed vocabulary, generated UUIDs, numeric legacy event IDs and counts
 # enter the trail. Plex account/client claims are deliberately omitted in v1.
+# Actor kinds are fixed: webhook senders are the unverified ``plex-server``
+# client, denied callers stay anonymous, and a valid admin token is the verified
+# ``owner-admin`` client identity (see app.auth); never a request-supplied name.
+ACTOR_IDS = {"plex_server": "plex-server", "admin_token": "owner-admin"}
+ACTOR_VERIFIED = {"admin_token": 1}
 OPERATIONS = {
-    "webhook.receipt": ("webhook", "anonymous", "webhook", {
+    "webhook.receipt": ("webhook", "plex_server", "webhook", {
         "received": {"accepted"},
         "rejected": {"missing_payload", "invalid_json", "invalid_payload", "invalid_form"},
     }),
     "rooms.reload": ("http", "anonymous", "rooms", {
         "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},
+        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
     }),
     "rooms.validate": ("http", "anonymous", "rooms", {
         "validated": {"valid"}, "rejected": {"invalid_config", "config_unavailable"},
+        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
     }),
+    "rooms.read": ("http", "anonymous", "rooms", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
+    "clients.read": ("http", "anonymous", "clients", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
     "service.config_load": ("service", "system", "rooms", {
         "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},
     }),
@@ -91,13 +100,18 @@ def configuration_changes(before, after):
     return result
 
 
-def append(path, *, action, outcome, reason_code, correlation, changed_fields=None, event_id=None):
+def append(path, *, action, outcome, reason_code, correlation, changed_fields=None, event_id=None,
+           admin=False):
     """Insert one validated record using an owned connection and bounded lock wait.
 
     A later worker may call this contract with its own path/correlation; it must
     never share main.db_conn. Only the operations above are supported in v1.
     """
     source, actor, target, outcomes = OPERATIONS[action]
+    if admin:
+        if outcome == "denied":
+            raise ValueError("Denied callers are never verified")
+        actor = "admin_token"
     if reason_code not in outcomes[outcome]:
         raise ValueError("Invalid audit result")
     correlation = str(UUID(correlation))
@@ -109,7 +123,8 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     if event_id is not None and (action != "webhook.receipt" or type(event_id) is not int or event_id < 1):
         raise ValueError("Invalid audit target")
     record = dict(recorded_at=utc_now(), correlation_id=correlation, source=source,
-                  actor_kind=actor, actor_id=None, actor_verified=0, action=action,
+                  actor_kind=actor, actor_id=ACTOR_IDS.get(actor),
+                  actor_verified=ACTOR_VERIFIED.get(actor, 0), action=action,
                   target_kind="event" if event_id is not None else target,
                   target_id=str(event_id) if event_id is not None else None,
                   outcome=outcome, reason_code=reason_code, changed_fields=changes)
