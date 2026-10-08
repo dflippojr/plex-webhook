@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
+CREATE INDEX IF NOT EXISTS idx_events_counts_cover ON events(
+    COALESCE(NULLIF(event, ''), 'unknown'),
+    COALESCE(NULLIF(player_title, ''), 'unknown'),
+    COALESCE(NULLIF(account_title, ''), 'unknown')
+);
+CREATE INDEX IF NOT EXISTS idx_events_clients_cover
+    ON events(player_title, player_uuid, received_at)
+    WHERE player_title IS NOT NULL;
 """
 
 
