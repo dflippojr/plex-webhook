@@ -56,8 +56,7 @@ rooms:
     name: Bedroom
     plex_clients:
       - title: " Bedroom Apple TV "
-      - title: Bedroom Phone
-        uuid: uuid-bed-phone
+        uuid: uuid-bed-tv
     lights:
       - {brand: tuya, id: plug1, name: Plug}
 """
@@ -91,18 +90,29 @@ def light_calls(monkeypatch):
     monkeypatch.setattr(
         lights,
         "apply_action",
-        lambda action, room_lights: calls.append((action, [light["id"] for light in room_lights])),
+        lambda action, room_lights, brightness=None: calls.append((action, [light["id"] for light in room_lights])),
     )
+    # Reads must never reach a controller; "unreadable" makes dim fall back and restore proceed.
+    monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())
     return calls
+
+
+def _reset_restore_state(dispatcher):
+    from app import db
+
+    dispatcher._active_clients.clear()
+    dispatcher._pending_rooms.clear()
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM light_restore_records")
 
 
 @pytest.fixture(autouse=True)
 def clean_dispatcher():
     from app import dispatcher
 
-    dispatcher._active_clients.clear()
+    _reset_restore_state(dispatcher)
     yield
-    dispatcher._active_clients.clear()
+    _reset_restore_state(dispatcher)
 
 
 @pytest.fixture

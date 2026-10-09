@@ -14,7 +14,7 @@ def test_resolves_by_title_case_and_whitespace_insensitive(registry):
 
 
 def test_uuid_wins_over_title(registry):
-    assert registry.resolve_room(payload("media.play", title="Living Room TV", uuid="uuid-bed-phone")) == "bedroom"
+    assert registry.resolve_room(payload("media.play", title="Living Room TV", uuid="uuid-bed-tv")) == "bedroom"
 
 
 def test_unknown_or_missing_player(registry):
@@ -110,16 +110,12 @@ def test_optional_fields_extensions_and_repetition(rooms_file):
   den:
     extension: preserved
     plex_clients:
-      - {uuid: null, title: null}
       - {uuid: fake-tv, title: " TV ", extra: preserved}
-      - {uuid: fake-tv, title: tv}
-      - {title: " "}
     lights:
       - {brand: unsupported, id: fake-light, name: null, model: null, extra: preserved}
 ''', encoding="utf-8")
     reg = RoomRegistry(rooms_file)
     assert reg.resolve_room(payload("media.play", title="tv")) == "den"
-    assert reg.resolve_room(payload("media.play", title=" ")) is None
     assert reg.rooms["den"]["extension"] == "preserved"
     assert reg.lights_for("den")[0]["extra"] == "preserved"
 

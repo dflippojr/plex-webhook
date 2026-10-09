@@ -25,7 +25,7 @@ rooms:
         uuid: null
     lights:
       - brand: govee   # govee | tuya
-        id: "TODO-device-id"
+        id: "TODO-living-room-device-id"
         name: "TODO-light-name"
         model: "TODO-govee-sku"   # optional, e.g. "H6159" - cloud fallback only
 
@@ -36,5 +36,5 @@ rooms:
         uuid: null
     lights:
       - brand: tuya
-        id: "TODO-device-id"
+        id: "TODO-bedroom-device-id"
         name: "TODO-light-name"

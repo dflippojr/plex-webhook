@@ -45,6 +45,17 @@ ACTOR_VERIFIED = {"admin_token": 1}
 LIGHT_FAILURE_REASONS = {
     "unsupported_brand", "missing_credentials", "missing_model", "no_address", "library_unavailable",
     "send_error", "request_failed", "tuya_rejected", "unexpected_error",
+    "light_off", "manual_change", "no_record",
+}
+# Per-light brightness decisions: outcome is the decision, reason the evidence behind it.
+LIGHT_DECISIONS = {
+    "restored": {"within_tolerance"},
+    "skipped_manual_change": {"brightness_changed", "turned_off"},
+    "skipped_was_off": {"was_off"},
+    "restore_without_read": {"read_failed"},
+    "dim_recorded": {"read_ok", "read_failed", "at_dim_level"},
+    "dim_skipped_off": {"was_off"},
+    "dim_kept_original": {"record_exists"},
 }
 OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
@@ -75,6 +86,7 @@ OPERATIONS = {
         "failed": LIGHT_FAILURE_REASONS,
         "skipped": LIGHT_FAILURE_REASONS,
     }),
+    "light.decision": ("dispatcher", "system", "light", LIGHT_DECISIONS),
     "light.action_summary": ("dispatcher", "system", "room", {
         "completed_unverified": {"all_sent"}, "partial": {"mixed_results"},
         "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
@@ -87,7 +99,7 @@ LIGHT_CREDENTIAL_SOURCES = {"none", "environment", "device_config"}
 LIGHT_STEPS = ("turn", "brightness")
 LABEL_LIMIT = 128
 CHANGE_PATHS = {"rooms", "rooms.count", "rooms.plex_clients", "rooms.lights", "rooms.other"}
-DETAIL_ACTIONS = {"light.action_queued", "light.result", "light.action_summary"}
+DETAIL_ACTIONS = {"light.action_queued", "light.result", "light.decision", "light.action_summary"}
 RECORD_COLUMNS = ("recorded_at", "correlation_id", "source", "actor_kind", "actor_id", "actor_verified",
                   "action", "target_kind", "target_id", "outcome", "reason_code", "changed_fields", "checksum")
 WRITE_LOCK = RLock()
@@ -166,7 +178,8 @@ def clean_detail(action, detail):
         cleaned["event_id"] = _number(detail["event_id"], 2 ** 63 - 1)
     if action == "light.action_queued":
         cleaned["targets"] = [
-            {"brand": _label(t["brand"]), "id": _label(t["id"]), "brightness": _number(t["brightness"], 100)}
+            {"brand": _label(t["brand"]), "id": _label(t["id"]),
+             "brightness": None if t["brightness"] is None else _number(t["brightness"], 100)}
             for t in detail["targets"]
         ]
     elif action == "light.result":
@@ -182,6 +195,11 @@ def clean_detail(action, detail):
              "progress": _steps(a["progress"])}
             for a in detail["attempts"]
         ]
+    elif action == "light.decision":
+        cleaned["brand"] = _label(detail["brand"])
+        for key in ("dim_percent", "restore_percent", "observed_percent"):
+            value = detail.get(key)
+            cleaned[key] = None if value is None else _number(value, 100)
     else:
         cleaned["counts"] = {
             _choice(key, result_outcomes): _number(value, 10 ** 6) for key, value in dict(detail["counts"]).items()

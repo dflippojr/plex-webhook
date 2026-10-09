@@ -72,7 +72,7 @@ def test_clients_lists_seen_players(client):
 
 def test_rooms_and_reload(client, rooms_file):
     assert set(client.get("/rooms").json()["rooms"]) == {"living_room", "bedroom"}
-    rooms_file.write_text("rooms:\n  den:\n    plex_clients: []\n    lights: []\n", encoding="utf-8")
+    rooms_file.write_text("rooms:\n  den:\n    plex_clients: [{title: x}]\n    lights: []\n", encoding="utf-8")
     resp = client.post("/rooms/reload")
     assert resp.json() == {"status": "reloaded", "rooms": ["den"]}
     assert list(client.get("/rooms").json()["rooms"]) == ["den"]
@@ -91,7 +91,7 @@ def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, mon
         pytest.fail("validation must not initialize gauges")
     original_init = dispatcher.init_room_gauges
     monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
-    rooms_file.write_text("rooms: {den: {}}", encoding="utf-8")
+    rooms_file.write_text("rooms: {den: {plex_clients: [{title: x}]}}", encoding="utf-8")
     assert client.post("/rooms/validate").json() == {"status": "valid", "rooms": ["den"]}
     assert registry._state is before
     assert dispatcher._active_clients == active

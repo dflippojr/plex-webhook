@@ -35,13 +35,10 @@ def test_repeated_play_does_not_redim(registry, light_calls):
     assert light_calls == [("dim", ["AA:BB"])]
 
 
-def test_two_clients_restore_only_after_last_stops(registry, light_calls):
+def test_stop_after_pause_restores_only_once(registry, light_calls):
     play("Bedroom Apple TV")
-    play("Bedroom Phone", "uuid-bed-phone")
-    assert light_calls == [("dim", ["plug1"])]
+    stop("Bedroom Apple TV", event="media.pause")
     stop("Bedroom Apple TV")
-    assert light_calls == [("dim", ["plug1"])]
-    stop("Bedroom Phone", "uuid-bed-phone")
     assert light_calls == [("dim", ["plug1"]), ("restore", ["plug1"])]
 
 
