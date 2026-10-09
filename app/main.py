@@ -9,6 +9,7 @@ import threading
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import audit, auth, dispatcher
@@ -19,6 +20,27 @@ app = FastAPI(title="plex-webhook")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 EVENT_LOG = DATA_DIR / "events.jsonl"
+
+
+def _env_int(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Request bounds for the unauthenticated webhook, sized for a Plex delivery:
+# one JSON `payload` field plus an optional thumbnail.
+MAX_BODY_BYTES = _env_int("WEBHOOK_MAX_BODY_BYTES", 2 * 1024 * 1024)
+MAX_FORM_FILES, MAX_FORM_FIELDS = 2, 10
+MAX_FIELD_BYTES = 512 * 1024
+# Stored copies of the raw payload (SQLite and events.jsonl) are truncated here.
+RAW_PAYLOAD_MAX_BYTES = _env_int("RAW_PAYLOAD_MAX_BYTES", 64 * 1024)
+
+
+class _BodyTooLarge(Exception):
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("plex-webhook")
@@ -38,6 +60,11 @@ LAST_EVENT_TIMESTAMP = Gauge(
 # Reuse the collector on module reload (tests reload main for counter seeding).
 if "AUDIT_FAILURES_TOTAL" not in globals():
     AUDIT_FAILURES_TOTAL = Counter("plex_webhook_audit_write_failures_total", "Audit records lost to write failures")
+if "WEBHOOK_REJECTED_TOTAL" not in globals():
+    WEBHOOK_REJECTED_TOTAL = Counter("plex_webhook_rejected_requests_total",
+                                     "Webhook requests rejected before storage", ["reason"])
+for _reason in ("body_too_large", "too_many_fields", "too_many_files", "field_too_large"):
+    WEBHOOK_REJECTED_TOTAL.labels(reason=_reason)
 if "ADMIN_DENIALS_TOTAL" not in globals():
     ADMIN_DENIALS_TOTAL = Counter("plex_webhook_admin_denials_total", "Denied admin requests", ["reason"])
 for _reason in auth.DENIAL_REASONS:
@@ -176,8 +203,29 @@ async def validate_rooms(request: Request):
 @app.post("/webhook")
 async def plex_webhook(request: Request):
     correlation = audit.correlation_id()
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        if not declared.isdigit():
+            _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
+            raise HTTPException(status_code=400, detail="Invalid webhook form")
+        if int(declared) > MAX_BODY_BYTES:
+            _reject_oversized("body_too_large")
+    _limit_streamed_body(request)
     try:
-        form = await request.form()
+        form = await request.form(max_files=MAX_FORM_FILES, max_fields=MAX_FORM_FIELDS,
+                                  max_part_size=MAX_FIELD_BYTES)
+    except _BodyTooLarge:
+        _reject_oversized("body_too_large")
+    except StarletteHTTPException as exc:
+        detail = str(exc.detail)
+        if detail.startswith("Too many files"):
+            _reject_oversized("too_many_files")
+        if detail.startswith("Too many fields"):
+            _reject_oversized("too_many_fields")
+        if detail.startswith("Part exceeded"):
+            _reject_oversized("field_too_large")
+        _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
+        raise HTTPException(status_code=400, detail="Invalid webhook form") from None
     except Exception:
         _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
         raise HTTPException(status_code=400, detail="Invalid webhook form") from None
@@ -213,11 +261,16 @@ async def plex_webhook(request: Request):
         "attachments": attachments,
     }
 
+    raw_json, truncated = _bounded_raw(json.dumps(decoded_payload))
+    if truncated:
+        record["payload"] = raw_json
+        record["payload_truncated"] = True
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with EVENT_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
-    event_id = insert_event(db_conn, received_at, event_type, payload, json.dumps(decoded_payload))
+    event_id = insert_event(db_conn, received_at, event_type, payload, raw_json, truncated)
     _record_audit(action="webhook.receipt", outcome="received" if reason == "accepted" else "rejected",
                   reason_code=reason, correlation=correlation, event_id=event_id)
 
@@ -230,6 +283,37 @@ async def plex_webhook(request: Request):
 
     logger.info("captured event=%s", event_type)
     return {"status": "received", "event": event_type}
+
+
+def _reject_oversized(reason):
+    """413 for a request over the bounds. Nothing is stored; the metric counts it."""
+    WEBHOOK_REJECTED_TOTAL.labels(reason=reason).inc()
+    logger.warning("reason=webhook_rejected code=%s", reason)
+    raise HTTPException(status_code=413, detail="Webhook request too large")
+
+
+def _limit_streamed_body(request):
+    """Count bytes as the form parser reads them, so a missing or false Content-Length cannot bypass the cap."""
+    receive, seen = request._receive, 0
+
+    async def limited():
+        nonlocal seen
+        message = await receive()
+        if message["type"] == "http.request":
+            seen += len(message.get("body", b""))
+            if seen > MAX_BODY_BYTES:
+                raise _BodyTooLarge
+        return message
+
+    request._receive = limited
+
+
+def _bounded_raw(text):
+    """Cap the stored raw payload at RAW_PAYLOAD_MAX_BYTES of UTF-8; returns (text, truncated)."""
+    data = text.encode("utf-8")
+    if len(data) <= RAW_PAYLOAD_MAX_BYTES:
+        return text, False
+    return data[:RAW_PAYLOAD_MAX_BYTES].decode("utf-8", errors="ignore"), True
 
 
 def _valid_payload(payload):

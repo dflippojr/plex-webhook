@@ -151,7 +151,8 @@ def test_retention_default_dry_run_boundary_and_monotonic_id(audit_db, monkeypat
     assert audit_cli.main(["--db", str(audit_db), "prune", "--apply"]) == 0
     assert not json.loads(capsys.readouterr().out)["dry_run"]
     with sqlite3.connect(audit_db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        # The fixture's 2026-01-01 event is past retention, so prune --apply now removes it.
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
 
 
 def test_sqlite_consistent_backup_restore_fixture(audit_db, tmp_path):
@@ -175,3 +176,52 @@ def test_changes_omit_arbitrary_names_and_values():
     assert changes == {"rooms.plex_clients": 1, "rooms.lights": 1, "rooms.other": 1}
     assert "SECRET" not in json.dumps(changes)
     assert audit.configuration_changes(before, before) == {}
+
+
+def _event_retention_fixture(tmp_path):
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=91)).isoformat()
+    recent = (now - timedelta(days=1)).isoformat()
+    path = tmp_path / "ret.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(db.SCHEMA)
+        db.insert_event(conn, old, "media.play", {}, '"old"')
+        db.insert_event(conn, recent, "media.play", {}, '"new"')
+    receipt(path)  # creates the audit table, as the running service does
+    log = tmp_path / "events.jsonl"
+    lines = [json.dumps({"received_at": old}), json.dumps({"received_at": recent}), "not json", json.dumps({"x": 1})]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path, log, lines, now
+
+
+def test_event_retention_dry_run_changes_nothing(tmp_path, capsys):
+    path, log, _, _ = _event_retention_fixture(tmp_path)
+    before_db, before_log = path.read_bytes(), log.read_bytes()
+    assert audit_cli.main(["--db", str(path), "prune"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["dry_run"] and result["events_eligible"] == 1 and result["event_log_eligible"] == 1
+    assert result["events_deleted"] == 0 and result["event_log_removed"] == 0
+    assert path.read_bytes() == before_db and log.read_bytes() == before_log
+
+
+def test_event_retention_apply_prunes_rows_and_trims_log(tmp_path, capsys):
+    path, log, lines, _ = _event_retention_fixture(tmp_path)
+    assert audit_cli.main(["--db", str(path), "prune", "--apply"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["events_deleted"] == 1 and result["event_log_removed"] == 1
+    with sqlite3.connect(path) as conn:
+        assert [r[0] for r in conn.execute("SELECT raw_payload FROM events")] == ['"new"']
+    # Unparseable and timestamp-less lines are kept rather than guessed at.
+    assert log.read_text(encoding="utf-8").splitlines() == lines[1:]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_event_retention_explicit_log_path_and_missing_log(tmp_path, capsys):
+    path, log, _, _ = _event_retention_fixture(tmp_path)
+    other = tmp_path / "elsewhere.jsonl"
+    log.rename(other)
+    assert audit_cli.main(["--db", str(path), "prune", "--apply", "--events-log", str(other)]) == 0
+    assert json.loads(capsys.readouterr().out)["event_log_removed"] == 1
+    other.unlink()
+    assert audit_cli.main(["--db", str(path), "prune"]) == 0
+    assert json.loads(capsys.readouterr().out)["event_log_eligible"] == 0

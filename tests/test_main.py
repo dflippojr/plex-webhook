@@ -196,3 +196,108 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
             REGISTRY.unregister(collector)
         monkeypatch.undo()
         importlib.reload(main).db_conn.close()
+
+
+def _stored(client):
+    return (client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+            client.log.exists() and client.log.read_text() != "")
+
+
+def _rejected(reason):
+    return REGISTRY.get_sample_value("plex_webhook_rejected_requests_total", {"reason": reason}) or 0
+
+
+def test_oversized_content_length_is_413_and_stores_nothing(client, light_calls):
+    before = _rejected("body_too_large")
+    resp = client.post("/webhook", data={"payload": "x" * (3 * 1024 * 1024)})
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+    assert _rejected("body_too_large") == before + 1
+    drain()
+    assert light_calls == []
+
+
+def test_streamed_body_over_cap_without_content_length_is_413(client, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1024)
+
+    def chunks():
+        yield b"payload=" + b"x" * 600
+        yield b"y" * 600
+
+    resp = client.post("/webhook", content=chunks(),
+                       headers={"content-type": "application/x-www-form-urlencoded"})
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+
+
+def test_too_many_fields_is_413_and_stores_nothing(client):
+    before = _rejected("too_many_fields")
+    data = {"payload": json.dumps(payload("media.play"))}
+    data.update({f"extra{i}": "v" for i in range(20)})
+    resp = client.post("/webhook", data=data, files={"thumb": ("t.jpg", b"x", "image/jpeg")})
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+    assert _rejected("too_many_fields") == before + 1
+
+
+def test_too_many_files_is_413_and_stores_nothing(client):
+    before = _rejected("too_many_files")
+    files = [(f"f{i}", (f"t{i}.jpg", b"x", "image/jpeg")) for i in range(5)]
+    resp = client.post("/webhook", data={"payload": json.dumps(payload("media.play"))}, files=files)
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+    assert _rejected("too_many_files") == before + 1
+
+
+def test_oversized_field_is_413_and_stores_nothing(client):
+    before = _rejected("field_too_large")
+    resp = client.post("/webhook", data={"payload": "x" * (600 * 1024)}, files={"t": ("t.jpg", b"x", "image/jpeg")})
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+    assert _rejected("field_too_large") == before + 1
+
+
+def test_malformed_content_length_is_400(client):
+    resp = client.post("/webhook", content=b"payload=x",
+                       headers={"content-type": "application/x-www-form-urlencoded", "content-length": "abc"})
+    assert resp.status_code == 400
+    assert _stored(client) == (0, False)
+
+
+def test_large_stored_payload_is_truncated_but_still_dispatched(client, light_calls, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "RAW_PAYLOAD_MAX_BYTES", 300)
+    body = payload("media.play")
+    body["Metadata"]["summary"] = "é" * 2000
+    assert post(client, body).status_code == 200
+    raw, truncated, title = client.conn.execute("SELECT raw_payload, raw_truncated, title FROM events").fetchone()
+    assert truncated == 1 and len(raw.encode("utf-8")) <= 300 and title == "A Film"
+    line = json.loads(client.log.read_text().splitlines()[0])
+    assert line["payload_truncated"] is True and len(line["payload"].encode("utf-8")) <= 300
+    drain()
+    drain()
+    assert light_calls == [("dim", ["AA:BB"])]
+
+
+def test_normal_payload_is_not_marked_truncated(client):
+    post(client, payload("media.play"))
+    assert client.conn.execute("SELECT raw_truncated FROM events").fetchone() == (0,)
+    assert "payload_truncated" not in json.loads(client.log.read_text().splitlines()[0])
+
+
+def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
+    import app.db as appdb
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, event TEXT, "
+                     "account_title TEXT, player_title TEXT, player_uuid TEXT, media_type TEXT, title TEXT, "
+                     "grandparent_title TEXT, rating_key TEXT, raw_payload TEXT NOT NULL)")
+        conn.execute("INSERT INTO events (received_at, raw_payload) VALUES ('t', '{}')")
+    monkeypatch.setattr(appdb, "DB_PATH", path)
+    conn = appdb.get_connection()
+    assert conn.execute("SELECT raw_truncated FROM events").fetchall() == [(0,)]
+    conn.close()

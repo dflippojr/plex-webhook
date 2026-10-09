@@ -34,8 +34,8 @@ Each operation gets a server-generated correlation UUID; client headers cannot
 supply it. IDs increase in append order (not necessarily request start order),
 and `recorded_at` is UTC at the append attempt. Receipts normally reference the
 numeric legacy `events.id`; no raw data is joined during export. IDs and
-correlations are private operational data, not public identifiers. There are no
-light outcome records yet (#51).
+correlations are private operational data, not public identifiers. Light outcomes
+are recorded as described under Light actions below.
 
 Changes summarize room additions/removals (`rooms`), the absolute room count
 delta (`rooms.count`), and the number of rooms whose clients, lights or other
@@ -125,9 +125,10 @@ not tamper-proof. `app.audit.checksum(exported_record)` recomputes it (excluding
 rotation, deployments and restore commands are outside application visibility;
 startup/reload records observe configuration and never name its editor.
 
-Legacy `events` and `events.jsonl` still store full raw payloads and attachment
-metadata. They are a separate privacy surface. This change does not prune,
-redact or migrate them; coordinate that later with media-tracker-sync.
+Legacy `events` and `events.jsonl` store raw payloads (capped, see README "Request
+and storage bounds") and attachment metadata. They are a separate privacy
+surface; they are pruned by the same retention command below but are not redacted.
+Coordinate redaction with media-tracker-sync.
 
 ## Retention maintenance (owner only)
 
@@ -142,10 +143,20 @@ python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/plex_events.db' prune 
 ```
 
 Only rows with `recorded_at` strictly older than now minus 90 days are deleted;
-the boundary is retained. Count and delete share a transaction. Legacy tables
-and JSONL are untouched. AUTOINCREMENT prevents ID reuse after pruning. Prune
-does not vacuum the database; removing rows does not necessarily shrink the file.
-The command cannot verify whether another process has the service running.
+the boundary is retained. Count and delete share a transaction.
+
+The same command also covers stored events: `events` rows with `received_at`
+older than the cutoff, and the matching lines of `events.jsonl`. The log defaults
+to `events.jsonl` beside the database (skipped if absent); override with
+`--events-log PATH`. Output reports `events_eligible`/`events_deleted` and
+`event_log_eligible`/`event_log_removed` next to the audit counts. Dry run (the
+default) changes nothing. With `--apply`, the database rows are deleted in one
+transaction, then `events.jsonl` is rewritten to a temp file and swapped in; lines
+that are not parseable or lack a timezone-aware `received_at` are kept. Stop the
+service first: it appends to the log while running. AUTOINCREMENT prevents ID reuse
+after pruning. Prune does not vacuum the database; removing rows does not
+necessarily shrink the file. The command cannot verify whether another process has
+the service running.
 
 ## Consistent backup and restore
 
