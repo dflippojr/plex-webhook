@@ -84,6 +84,25 @@ def _record_audit(**fields):
         AUDIT_FAILURES_TOTAL.inc()
 
 
+def _light_audit_context(correlation, event_id):
+    """Bind the receipt to the worker. The path is resolved here; the worker opens its own connection."""
+    try:
+        path = db_conn.execute("PRAGMA database_list").fetchone()[2]
+    except Exception:
+        logger.warning("reason=audit_write_failed")
+        AUDIT_FAILURES_TOTAL.inc()
+        return None
+
+    def record(**fields):
+        try:
+            audit.append(path, **fields)
+        except Exception:
+            logger.warning("reason=audit_write_failed")
+            AUDIT_FAILURES_TOTAL.inc()
+
+    return dispatcher.AuditContext(record, correlation, event_id)
+
+
 _record_audit(action="service.config_load", outcome=registry.load_outcome,
               reason_code=registry.load_reason, correlation=audit.correlation_id(),
               changed_fields=audit.configuration_changes({}, registry.rooms)
@@ -207,7 +226,7 @@ async def plex_webhook(request: Request):
     EVENTS_TOTAL.labels(event=event_type or "unknown", player=player_title, account=account_title).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
 
-    dispatcher.handle_event(payload)
+    dispatcher.handle_event(payload, _light_audit_context(correlation, event_id) if payload else None)
 
     logger.info("captured event=%s", event_type)
     return {"status": "received", "event": event_type}

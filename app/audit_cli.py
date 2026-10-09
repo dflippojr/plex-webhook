@@ -62,11 +62,17 @@ def read_records(conn, args):
             clauses.append(f"{column} {operator} ?")
             params.append(value)
     params.append(args.limit)
+    columns = COLUMNS
+    if "detail" in {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}:
+        columns = COLUMNS + ("detail",)
     # Column names/operators come exclusively from fixed application constants.
-    query = f"SELECT {', '.join(COLUMNS)} FROM audit_events WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?"
+    query = f"SELECT {', '.join(columns)} FROM audit_events WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?"
     for row in conn.execute(query, params):
         record = dict(row)
         record["changed_fields"] = json.loads(record["changed_fields"])
+        # Only light records carry detail; omitting it elsewhere keeps legacy checksums verifiable.
+        if record.pop("detail", None) is not None:
+            record["detail"] = json.loads(row["detail"])
         yield record
 
 

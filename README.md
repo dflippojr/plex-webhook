@@ -11,8 +11,8 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
 
 The next planned steps are those three hardware checks; they need the owner's devices
-and accounts. Other open issues (for example #13, #42, #49) cover deployment, per-room
-brightness and light-action audit correlation.
+and accounts. Other open issues (for example #13, #42) cover deployment and per-room
+brightness.
 
 ## Run
 
@@ -216,7 +216,10 @@ keys for your devices.
 
 Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
-and shown on the same Grafana dashboard.
+and shown on the same Grafana dashboard. `plex_dispatcher_actions_total` counts
+dispatcher calls that completed; it is **not** a verified per-device success counter
+(a call where every light was skipped or failed still counts). Per-light results are in
+the [audit trail](docs/audit.md#light-actions).
 
 Application-owned failure logs in `app/lights.py` and `app/dispatcher.py`
 use fixed `reason` and `operation` fields:
