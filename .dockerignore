@@ -1,0 +1,9 @@
+# Allow only the files used by the production image into the build context.
+# This excludes .env, live config, device keys, event data, Git and test output.
+*
+!Dockerfile
+!requirements.lock
+!app/
+!app/**
+**/__pycache__
+**/*.pyc

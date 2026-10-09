@@ -310,7 +310,7 @@ Govee is already percent).
 
 Light actions run on a single background worker thread, in arrival order, so a slow
 or unreachable light never blocks `/health`, `/metrics` or the next webhook; a failed
-action is logged and does not stop later ones. Tests: `pip install -r requirements-dev.txt && pytest`.
+action is logged and does not stop later ones. Tests: `pip install --require-hashes --only-binary :all: -r requirements-dev.lock && pytest`.
 
 Light control (`app/lights.py`) now has real per-brand controllers:
 
@@ -377,11 +377,14 @@ paths at a temporary directory through the `DATA_DIR`, `DB_PATH` and
 `/data/plex_events.db` and `/config/rooms.yaml`, as in the container).
 
 ```bash
-pip install -r requirements-dev.txt   # Python 3.12; netifaces (a tinytuya dependency) needs a C compiler
+pip install --require-hashes --only-binary :all: -r requirements-dev.lock   # Python 3.12
 pytest --cov=app --cov-report=xml
 ```
 
-CI runs the same command on GitHub-hosted runners, not in the Docker image.
+CI runs the same command on GitHub-hosted runners. The development lock is
+constrained by `requirements.lock`, so tests use the production dependency
+versions. After changing either requirements input or the base-image digest,
+run `./scripts/lock_requirements.sh` to regenerate both hash locks.
 
 ## Code analysis
 
@@ -405,7 +408,7 @@ pip (`requirements.txt`, `requirements-dev.txt` and the compiled requirements),
 Docker (`Dockerfile` and `docker-compose.yml`) and GitHub Actions (workflow
 action references). Review Python updates against `requirements.lock`, which
 the production image installs; regenerate it with `./scripts/lock_requirements.sh`
-if an update changes direct pins without refreshing the lockfile.
+if an update changes direct pins without refreshing both lockfiles.
 
 After merging the configuration, verify a default-branch scan and a real
 Dependabot PR scan in Actions, then confirm the matching commit/PR analysis
@@ -423,3 +426,37 @@ D:\Docker\sonarqube\scan.ps1 -Path D:\Docker\plex-webhook -ProjectKey plex-webho
 ```
 
 See `D:\Docker\sonarqube\README.md`.
+
+## Container constraints
+
+The base image is digest-pinned and installs only hash-verified wheels; no C
+compiler is needed. The build context includes only the Dockerfile, production
+lock and application source. Local configuration, device keys, event data and
+Git metadata are excluded. `devices.json` from the Tuya wizard is also gitignored.
+
+Compose runs as UID 10001 with all capabilities dropped and
+`no-new-privileges`. Its root filesystem is read-only; `/data` remains writable
+through the existing bind mount, `/config` remains read-only, and `/tmp` is a
+64 MiB tmpfs with mode 1777, noexec and nosuid. The service is capped at 512 MiB
+memory and one CPU. A Python standard-library healthcheck calls the existing
+`/health` endpoint every 30 seconds (3-second request timeout, 5-second check
+timeout, 20-second startup grace, three failures before unhealthy). Docker
+reports health status; the restart policy does not restart an unhealthy process.
+
+The owner applies this change on the tower after merging:
+
+```powershell
+Set-Location D:\Docker\plex-webhook
+git switch master
+git pull --ff-only
+docker compose config --quiet
+docker compose build plex-webhook
+docker compose up -d --no-deps plex-webhook
+docker compose ps plex-webhook
+docker inspect --format '{{.State.Health.Status}}' plex-webhook
+curl.exe --fail http://127.0.0.1:9800/health
+```
+
+Allow up to one minute for health to become healthy. Keep the existing `.env`,
+`data/` and `config/`; the bind-mounted data directory must remain writable by
+UID 10001. These apply commands recreate the service and are owner-run only.

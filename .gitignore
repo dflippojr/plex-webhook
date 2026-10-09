@@ -8,3 +8,4 @@ config/rooms.yaml
 coverage.xml
 .coverage
 .pytest_cache/
+devices.json
