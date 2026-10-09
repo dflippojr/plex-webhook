@@ -122,9 +122,37 @@ capture available; a missing startup file also leaves dispatch disabled.
 
 ## Phase 1 — raw event capture
 
-Every webhook delivery is appended as a JSON line to `./data/events.jsonl`:
+Each accepted delivery is appended as a JSON line to `./data/events.jsonl`:
 `received_at`, `event` type, full decoded `payload`, and any attachment
-metadata (e.g. thumbnail).
+metadata (e.g. thumbnail). This includes deliveries whose payload is missing or
+not valid JSON. It does **not** include requests rejected before storage:
+`invalid_form` (400), oversized requests (413) and handler crashes leave no
+`events.jsonl` line or `events` row (the audit trail and metrics still note
+them where applicable).
+
+### Request and storage bounds
+
+`POST /webhook` is unauthenticated, so one request is bounded before it is
+parsed or stored. Over-limit requests get **413**, are counted in
+`plex_webhook_rejected_requests_total{reason}` and persist nothing.
+
+| Bound | Value | `reason` |
+|---|---|---|
+| Body size (`Content-Length`, and bytes actually read) | `WEBHOOK_MAX_BODY_BYTES`, default 2 MiB | `body_too_large` |
+| Form fields | 10 | `too_many_fields` |
+| Files (thumbnail) | 2 | `too_many_files` |
+| Size of one non-file field | 512 KiB | `field_too_large` |
+
+A malformed `Content-Length` gets 400. The stored `raw_payload` (SQLite) and the
+`payload` in `events.jsonl` are each capped at `RAW_PAYLOAD_MAX_BYTES` (default
+64 KiB of UTF-8). A longer payload is cut at the cap; the parsed columns and the
+dispatched event are unaffected. Truncated SQLite rows have `raw_truncated = 1`;
+truncated JSONL lines have `"payload_truncated": true` and `payload` is the
+truncated JSON text rather than an object. Existing databases gain the
+`raw_truncated` column (default 0) on the next service start.
+
+Stored events are pruned with the owner-run offline retention command in
+[`docs/audit.md`](docs/audit.md#retention-maintenance-owner-only).
 
 ## Phase 2 — structured storage + metrics
 

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS events (
     title TEXT,
     grandparent_title TEXT,
     rating_key TEXT,
-    raw_payload TEXT NOT NULL
+    raw_payload TEXT NOT NULL,
+    raw_truncated INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
@@ -37,10 +38,14 @@ def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    # Databases created before the stored-size cap lack the marker column.
+    if "raw_truncated" not in {row[1] for row in conn.execute("PRAGMA table_info(events)")}:
+        conn.execute("ALTER TABLE events ADD COLUMN raw_truncated INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
     return conn
 
 
-def insert_event(conn, received_at, event, payload, raw_payload_json):
+def insert_event(conn, received_at, event, payload, raw_payload_json, raw_truncated=False):
     with WRITE_LOCK:
         metadata = (payload or {}).get("Metadata") or {}
         account = (payload or {}).get("Account") or {}
@@ -50,8 +55,8 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
             """
             INSERT INTO events (
                 received_at, event, account_title, player_title, player_uuid,
-                media_type, title, grandparent_title, rating_key, raw_payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                media_type, title, grandparent_title, rating_key, raw_payload, raw_truncated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 received_at,
@@ -64,6 +69,7 @@ def insert_event(conn, received_at, event, payload, raw_payload_json):
                 metadata.get("grandparentTitle"),
                 metadata.get("ratingKey"),
                 raw_payload_json,
+                1 if raw_truncated else 0,
             ),
         )
         conn.commit()

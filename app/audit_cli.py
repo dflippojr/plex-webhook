@@ -5,6 +5,7 @@ Only stdlib and app.audit are imported; never the service or its devices.
 """
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -76,17 +77,72 @@ def read_records(conn, args):
         yield record
 
 
-def prune(conn, *, apply=False, now=None):
-    """Sole supported deletion path: explicit offline owner-run 90-day retention."""
+def _has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _log_received_before(line, cutoff):
+    """True only for a parseable record older than the cutoff; anything else is kept."""
+    try:
+        received = datetime.fromisoformat(json.loads(line)["received_at"])
+        if received.tzinfo is None:
+            return False
+        return received.astimezone(timezone.utc).isoformat(timespec="microseconds") < cutoff
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def prune_event_log(path, cutoff, *, apply=False):
+    """Count, and with apply remove, events.jsonl lines older than the cutoff; returns (eligible, kept)."""
+    path = Path(path)
+    if not path.is_file():
+        return 0, 0
+    eligible = kept = 0
+    temp = path.with_name(path.name + ".prune.tmp") if apply else None
+    try:
+        with path.open("r", encoding="utf-8") as source:
+            out = temp.open("w", encoding="utf-8", newline="") if apply else None
+            try:
+                for line in source:
+                    if _log_received_before(line, cutoff):
+                        eligible += 1
+                    else:
+                        kept += 1
+                        if out:
+                            out.write(line)
+            finally:
+                if out:
+                    out.close()
+        if apply:
+            os.replace(temp, path)
+    finally:
+        if temp and temp.exists():
+            temp.unlink()
+    return eligible, kept
+
+
+def prune(conn, *, apply=False, now=None, events_log=None):
+    """Sole supported deletion path: explicit offline owner-run 90-day retention.
+
+    Covers audit rows, legacy `events` rows and, when given, events.jsonl.
+    """
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=90)).isoformat(timespec="microseconds")
     # Lock count+delete together only for the explicitly writable operation.
     if apply:
         conn.execute("BEGIN IMMEDIATE")
     with conn:
         count = conn.execute("SELECT COUNT(*) FROM audit_events WHERE recorded_at < ?", (cutoff,)).fetchone()[0]
+        events = 0
+        if _has_table(conn, "events"):
+            events = conn.execute("SELECT COUNT(*) FROM events WHERE received_at < ?", (cutoff,)).fetchone()[0]
         if apply:
             conn.execute("DELETE FROM audit_events WHERE recorded_at < ?", (cutoff,))
-    return {"cutoff": cutoff, "eligible": count, "deleted": count if apply else 0, "dry_run": not apply}
+            if _has_table(conn, "events"):
+                conn.execute("DELETE FROM events WHERE received_at < ?", (cutoff,))
+    log_eligible, _ = prune_event_log(events_log, cutoff, apply=apply) if events_log else (0, 0)
+    return {"cutoff": cutoff, "eligible": count, "deleted": count if apply else 0, "dry_run": not apply,
+            "events_eligible": events, "events_deleted": events if apply else 0,
+            "event_log_eligible": log_eligible, "event_log_removed": log_eligible if apply else 0}
 
 
 def parser():
@@ -103,7 +159,9 @@ def parser():
         command.add_argument("--since", type=utc_argument)
         command.add_argument("--until", type=utc_argument)
     command = commands.add_parser("prune", help="Offline 90-day retention, dry-run by default")
-    command.add_argument("--apply", action="store_true", help="Delete eligible audit rows; service must be stopped")
+    command.add_argument("--apply", action="store_true",
+                         help="Delete eligible audit and event rows and trim events.jsonl; service must be stopped")
+    command.add_argument("--events-log", help="events.jsonl to trim (default: beside the database, if present)")
     return result
 
 
@@ -112,7 +170,8 @@ def main(argv=None):
     try:
         with closing(open_database(args.db, writable=args.command == "prune" and args.apply)) as conn:
             if args.command == "prune":
-                print(json.dumps(prune(conn, apply=args.apply), sort_keys=True))
+                log = args.events_log or Path(args.db).resolve().with_name("events.jsonl")
+                print(json.dumps(prune(conn, apply=args.apply, events_log=log), sort_keys=True))
             else:
                 for record in read_records(conn, args):
                     if args.command == "export":
