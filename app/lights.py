@@ -38,6 +38,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
+from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
 import yaml
@@ -73,6 +74,10 @@ GOVEE_LAN_SCAN_MULTICAST_ADDR = "239.255.255.250"
 GOVEE_LAN_LISTEN_PORT = 4002        # devices reply here
 GOVEE_LAN_CONTROL_PORT = 4003       # unicast control commands go here
 GOVEE_LAN_SCAN_TIMEOUT_S = 2.0
+# Only RFC 1918 device addresses; is_private also includes special-use ranges.
+GOVEE_LAN_PRIVATE_NETWORKS = tuple(IPv4Network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+))
 
 GOVEE_CLOUD_API_URL = "https://developer-api.govee.com/v1/devices/control"
 GOVEE_CLOUD_STATE_URL = "https://developer-api.govee.com/v1/devices/state"
@@ -382,16 +387,16 @@ class GoveeController:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
-                    data, _addr = sock.recvfrom(4096)
+                    data, addr = sock.recvfrom(4096)
                 except socket.timeout:
                     break
                 try:
                     reply = json.loads(data.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (ValueError, RecursionError):
                     continue
-                payload = (reply.get("msg") or {}).get("data") or {}
-                if payload.get("device") == device_id and payload.get("ip"):
-                    return payload["ip"]
+                ip = self._discovery_address(reply, device_id, addr[0])
+                if ip is not None:
+                    return ip
         except OSError:
             logger.info("reason=discovery_failed brand=govee operation=lan_discovery id=%s fallback=cloud", device_id)
             return None
@@ -400,6 +405,28 @@ class GoveeController:
                 sock.close()
 
         return None
+
+    @staticmethod
+    def _discovery_address(reply, device_id: str, source_ip: str) -> str | None:
+        """Accept only a matching device with a source-matched RFC 1918 IPv4 literal."""
+        if not isinstance(reply, dict):
+            return None
+        message = reply.get("msg")
+        if not isinstance(message, dict):
+            return None
+        payload = message.get("data")
+        if not isinstance(payload, dict) or payload.get("device") != device_id:
+            return None
+        ip = payload.get("ip")
+        if not isinstance(ip, str) or ip != source_ip:
+            return None
+        try:
+            address = IPv4Address(ip)
+        except ValueError:
+            return None
+        if not any(address in network for network in GOVEE_LAN_PRIVATE_NETWORKS):
+            return None
+        return ip
 
     def _send_lan_command(self, ip: str, message: dict):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
