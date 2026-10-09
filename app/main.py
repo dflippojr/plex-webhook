@@ -195,7 +195,7 @@ def _room_config_operation(operation, action, correlation):
 async def validate_rooms(request: Request):
     _require_admin(request, "rooms.validate")
     correlation = audit.correlation_id()
-    candidate, _, _ = _room_config_operation(registry.validate, "rooms.validate", correlation)
+    candidate, _, _, _ = _room_config_operation(registry.validate, "rooms.validate", correlation)
     _record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation=correlation, admin=True)
     return {"status": "valid", "rooms": list(candidate)}
 

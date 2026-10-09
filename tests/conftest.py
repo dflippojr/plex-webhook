@@ -78,7 +78,7 @@ def registry(rooms_file):
     reg.reload()
     yield reg
     reg.config_path = Path(os.environ["ROOMS_CONFIG_PATH"])
-    reg._state = ({}, {}, {})
+    reg._state = ({}, {}, {}, [])
 
 
 @pytest.fixture
@@ -104,6 +104,7 @@ def _reset_restore_state(dispatcher):
     dispatcher._pending_rooms.clear()
     with db.get_connection() as conn:
         conn.execute("DELETE FROM light_restore_records")
+        conn.execute("DELETE FROM automation_room_owners")
 
 
 @pytest.fixture(autouse=True)

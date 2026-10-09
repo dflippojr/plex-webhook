@@ -15,8 +15,8 @@
 #
 # One room per Plex player: `plex_clients` must hold exactly one entry, and a
 # light `id` may appear in only one room. Several players in the same physical
-# space need several rooms, each with its own lights; rooms do not influence
-# each other. A config that breaks this is rejected on validate/reload.
+# space need several rooms, each with its own lights. Cross-room behavior needs
+# an explicit automation; lights are never shared. Invalid configs are rejected.
 #
 # Optional per room: `dim_brightness_percent` (integer 1-100, default 20) and
 # `restore_brightness_percent` (integer 1-100, default 100). Each light is
@@ -56,3 +56,18 @@ rooms:
         name: "TODO-light-name"
         # switch_dp: 1
         # brightness_dp: 3
+
+# Optional cross-room rules; leave empty for independent rooms.
+# Triggers: dim (play/resume), restore (pause/stop). Action: integer 1-100 or restore.
+# Active playback in the target always wins; the latest automation owns its restore.
+# A source restore automatically restores its owned targets, respecting manual changes.
+# Unknown rooms, self-targets and cycles of any length are rejected.
+automations: []
+# Example: Living Room playback sets the Bedroom to 40%, then restores it.
+# automations:
+#   - trigger: {room: living_room, event: dim}
+#     target_room: bedroom
+#     action: 40
+#   - trigger: {room: living_room, event: restore}
+#     target_room: bedroom
+#     action: restore

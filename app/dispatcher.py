@@ -51,6 +51,7 @@ _pending_rooms: set[str] = set()
 def _load_pending_rooms():
     try:
         _pending_rooms.update(db.rooms_with_restore_records())
+        _pending_rooms.update(db.automation_sources())
     except Exception:
         logger.warning("reason=restore_records_unavailable operation=load_pending")
 
@@ -113,11 +114,52 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
 
     if not was_active and is_active:
         _pending_rooms.add(room_key)
-        _dispatch(room_key, "dim", audit_context)
+        _dispatch_lifecycle(room_key, "dim", audit_context)
     elif (was_active and not is_active) or (not was_active and event in DEACTIVATE_EVENTS and room_key in _pending_rooms):
         # The second case: a restart lost the player state but the dim's records survived.
         _pending_rooms.discard(room_key)
-        _dispatch(room_key, "restore", audit_context)
+        _dispatch_lifecycle(room_key, "restore", audit_context)
+
+
+def _dispatch_lifecycle(room_key, action, context):
+    _dispatch(room_key, action, context)
+    entries = copy.deepcopy(registry.automations_for(room_key, action))
+    # Cleanup includes persisted targets, even if a reload removed their automation.
+    snapshots = {room: (copy.deepcopy(registry.lights_for(room)), dict(registry.settings_for(room)))
+                 for room in registry.rooms}
+    blocked = {room for room in snapshots if _active_clients.get(room)}
+    _action_executor.submit(_run_automations, room_key, action, entries, snapshots, blocked, context)
+
+
+def _run_automations(source, event, entries, snapshots, blocked, context):
+    """Run on the same worker as playback actions; automation actions never emit triggers."""
+    try:
+        if event == "restore":
+            for target in sorted(db.automation_targets(source)):
+                _automation_action(source, target, "restore", snapshots, blocked, context)
+        for entry in entries:
+            _automation_action(source, entry["target_room"], entry["action"], snapshots, blocked, context)
+    except Exception:
+        logger.error("reason=dispatcher_action_failed operation=automation")
+
+
+def _automation_action(source, target, action, snapshots, blocked, context):
+    if target not in snapshots:
+        return
+    room_lights, settings = snapshots[target]
+    settings = dict(settings)
+    if type(action) is int:
+        settings["dim"] = action
+        action = "dim"
+    action_id = audit.correlation_id()
+    if target in blocked:
+        _record(context, "light.action_summary", "skipped", "own_playback_active",
+                target, action, action_id, counts={})
+        return
+    _record(context, "light.action_queued", "queued", "accepted", target, action, action_id,
+            targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
+                      "brightness": settings["dim"] if action == "dim" else None} for light in room_lights])
+    _apply(target, action, room_lights, context, action_id, settings, automation_source=source)
 
 
 def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = None):
@@ -208,6 +250,9 @@ def _dim(room_key, room_lights, settings, context, action_id):
                 continue
             _decide(context, room_key, light, "dim", action_id, "dim_kept_original", "record_exists", settings,
                     existing["restore_percent"])
+            # A newer automation or the target's own playback changes the expected level,
+            # while preserving the brightness from before the first dim.
+            db.put_restore_record(room_key, light_id, False, existing["restore_percent"], dim)
             targets.append(light)
             continue
         reading = lights.read_state(light)
@@ -263,10 +308,19 @@ def _restore(room_key, room_lights, settings, context, action_id):
     return results + applied if isinstance(applied, list) else None
 
 
-def _apply(room_key: str, action: str, room_lights=None, audit_context=None, action_id=None, settings=None):
+def _apply(room_key: str, action: str, room_lights=None, audit_context=None, action_id=None, settings=None,
+           automation_source=None):
     action_id = action_id or audit.correlation_id()
     settings = settings or {"dim": DEFAULT_DIM_PERCENT, "restore": DEFAULT_RESTORE_PERCENT}
     try:
+        # Also check at execution: a queued automation must yield to playback that
+        # started while an earlier light command was still running.
+        if automation_source is not None and _active_clients.get(room_key):
+            _record(audit_context, "light.action_summary", "skipped", "own_playback_active",
+                    room_key, action, action_id, counts={})
+            return
+        if action in ("dim", "restore"):
+            db.set_automation_owner(room_key, automation_source if action == "dim" else None)
         if room_lights is None:
             room_lights = registry.lights_for(room_key)
         if action == "dim":
