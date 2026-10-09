@@ -29,7 +29,8 @@ def _key_path(path, key):
     if path == "rooms" and isinstance(key, str):
         return f"rooms.{key}"
     if key in ("rooms", "plex_clients", "lights", "uuid", "title", "brand", "id", "name", "model",
-               "dim_brightness_percent", "restore_brightness_percent", "switch_dp", "brightness_dp"):
+               "dim_brightness_percent", "restore_brightness_percent", "switch_dp", "brightness_dp",
+               "automations", "trigger", "room", "event", "target_room", "action"):
         return str(key) if path == "$" else f"{path}.{key}"
     return f"{path}.[key]"
 
@@ -118,6 +119,50 @@ def _index_client(index, origins, value, room_key, path):
     origins.setdefault(value, path)
 
 
+def _validate_automation(entry, path, rooms):
+    _mapping(entry, path)
+    trigger = entry.get("trigger")
+    _mapping(trigger, f"{path}.trigger")
+    source = _string(trigger, "room", f"{path}.trigger", required=True)
+    target = _string(entry, "target_room", path, required=True)
+    for room, field in ((source, "trigger.room"), (target, "target_room")):
+        if room not in rooms:
+            raise RoomConfigError([{"path": f"{path}.{field}", "code": "unknown_room"}])
+    if source == target:
+        raise RoomConfigError([{"path": f"{path}.target_room", "code": "self_target"}])
+    if trigger.get("event") not in ("dim", "restore"):
+        raise RoomConfigError([{"path": f"{path}.trigger.event", "code": "expected_lifecycle_event"}])
+    action = entry.get("action")
+    if action != "restore" and (type(action) is not int or not 1 <= action <= 100):
+        raise RoomConfigError([{"path": f"{path}.action", "code": "expected_automation_action"}])
+
+
+def _validate_automations(data, rooms):
+    entries = data.get("automations", [])
+    if not isinstance(entries, list):
+        raise RoomConfigError([{"path": "automations", "code": "expected_list"}])
+    edges = {room: set() for room in rooms}
+    for index, entry in enumerate(entries):
+        _validate_automation(entry, f"automations[{index}]", rooms)
+        edges[entry["trigger"]["room"]].add(entry["target_room"])
+    # Topological traversal rejects cycles across all trigger types, without recursion.
+    indegree = dict.fromkeys(rooms, 0)
+    for targets in edges.values():
+        for target in targets:
+            indegree[target] += 1
+    ready = [room for room, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        visited += 1
+        for target in edges[ready.pop()]:
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+    if visited != len(rooms):
+        raise RoomConfigError([{"path": "automations", "code": "automation_cycle"}])
+    return entries
+
+
 def _validate(data):
     _mapping(data, "$")
     rooms = data.get("rooms", {})
@@ -155,13 +200,13 @@ def _validate(data):
             light_origins[light_id] = f"{light_path}.id"
         if len(clients) != 1:
             raise RoomConfigError([{"path": f"{path}.plex_clients", "code": "expected_one_player", "hint": ONE_PLAYER_HINT}])
-    return rooms, uuid_index, title_index
+    return rooms, uuid_index, title_index, _validate_automations(data, rooms)
 
 
 class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
-        self._state = ({}, {}, {})
+        self._state = ({}, {}, {}, [])
         self.load_outcome, self.load_reason = "rejected", "config_unavailable"
         try:
             self.reload()
@@ -175,6 +220,10 @@ class RoomRegistry:
     def rooms(self):
         return self._state[0]
 
+    def automations_for(self, room_key, event):
+        return [entry for entry in self._state[3]
+                if entry["trigger"]["room"] == room_key and entry["trigger"]["event"] == event]
+
     def validate(self):
         """Read and validate the configured file without publishing any state."""
         try:
@@ -187,13 +236,13 @@ class RoomRegistry:
 
     def reload(self):
         candidate = self.validate()
-        # One reference publishes the rooms and both indexes together.
+        # One reference publishes rooms, indexes and automations together.
         self._state = candidate
         self.load_outcome, self.load_reason = "activated", "loaded"
         logger.info("loaded %d room(s)", len(self.rooms))
 
     def resolve_room(self, payload: dict) -> str | None:
-        _, uuid_index, title_index = self._state
+        _, uuid_index, title_index, _ = self._state
         player = (payload or {}).get("Player") or {}
         uuid = player.get("uuid")
         title = player.get("title")

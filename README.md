@@ -211,7 +211,7 @@ rooms:
 **One room per Plex player, and lights are not shared.** A room's `plex_clients`
 must hold exactly one entry, and a light `id` may appear in only one room. Several
 players in the same physical space need several rooms, each with its own lights;
-rooms do not influence each other. A config that breaks these rules is rejected on
+rooms are independent unless an explicit automation is configured. A config that breaks these rules is rejected on
 validate/reload, the previous mapping is kept, and the error names the field path.
 
 Workflow to fill it in: play something on the target device, hit
@@ -229,6 +229,58 @@ commit that file.
 
 Dispatch logic (`app/dispatcher.py`): the room's player starting triggers a `dim`
 action for the room's lights; pause/stop triggers `restore`.
+
+### Optional cross-room automations
+
+Add a top-level `automations` list to `rooms.yaml` to make one room's playback
+affect another room. Omit it (or use `[]`) to keep every room independent:
+
+```yaml
+automations:
+  - trigger: {room: living_room, event: dim}
+    target_room: bedroom
+    action: 40
+  - trigger: {room: living_room, event: restore}
+    target_room: bedroom
+    action: restore
+```
+
+`trigger.room` and `target_room` are exact keys under `rooms`. `trigger.event`
+is `dim` (play/resume) or `restore` (pause/stop), fired only on a room lifecycle
+transition; repeated play or stop events do not retrigger it. `action` is either
+a whole brightness percent **1–100** or the string `restore`. A brightness action
+uses the same dim behavior as playback: it leaves off lights off and records
+each light's prior brightness. `restore` restores existing records; it does
+nothing to lights without a record. Automation actions do not emit new triggers.
+
+The target room's own playback always wins. Automations skip a target with an
+active player, including playback that starts while an automation is queued.
+Starting playback in an automated target takes over its restore records, keeps
+the original brightness, and uses that room's own dim level. Its eventual
+pause/stop restores those records.
+
+Between automations targeting a room, the latest applied trigger wins (entries
+for the same trigger run in list order). It retains the brightness from before
+the first dim and updates the expected dim level for the manual-change check.
+Only the latest source owns the pending automatic restore: restoring an older
+source cannot undo a newer automation. A source's restore first puts back its
+owned targets, then runs its explicit `restore` entries. Thus a brightness
+action on a restore trigger remains until the source's next restore or a newer
+action on the target. A manual brightness change or switching a light off blocks
+restoration, using the same five-point tolerance described below.
+
+Restore records and the latest source ownership are persisted in SQLite, so the
+source's next pause/stop also cleans up after a restart. Removing an automation
+and reloading still permits that cleanup while its target room and lights remain
+configured. Queued actions retain their configuration snapshot.
+
+Validation rejects unknown rooms (`unknown_room`), self-targets (`self_target`),
+unsupported events (`expected_lifecycle_event`), invalid actions
+(`expected_automation_action`), and cycles of any length across dim and restore
+rules (`automation_cycle`). Rooms still have one player each and never share
+lights. Validate/reload uses the same admin endpoints above and preserves the
+previous configuration on failure. The tests cover this feature with fake
+lights; checking real devices is an owner step after deployment.
 
 **Brightness.** All comparisons are in percent (Tuya's 10-1000 scale is converted;
 Govee is already percent).

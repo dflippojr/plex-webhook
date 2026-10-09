@@ -143,7 +143,7 @@ rooms:
 def test_invalid_startup_is_sanitized(rooms_file, caplog):
     rooms_file.write_text("rooms: [private-value", encoding="utf-8")
     reg = RoomRegistry(rooms_file)
-    assert reg._state == ({}, {}, {})
+    assert reg._state == ({}, {}, {}, [])
     assert "invalid_yaml" in caplog.text
     assert "private-value" not in caplog.text
 

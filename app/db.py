@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS light_restore_records (
     recorded_at TEXT NOT NULL,
     PRIMARY KEY (room, light_id)
 );
+CREATE TABLE IF NOT EXISTS automation_room_owners (
+    target_room TEXT PRIMARY KEY,
+    trigger_room TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
 CREATE INDEX IF NOT EXISTS idx_events_counts_cover ON events(
@@ -152,6 +156,27 @@ def put_restore_record(room, light_id, was_off, restore_percent, dim_percent):
 def delete_restore_record(room, light_id):
     with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
         conn.execute("DELETE FROM light_restore_records WHERE room = ? AND light_id = ?", (room, light_id))
+
+
+def set_automation_owner(target_room, trigger_room):
+    """The latest dim owns the target's pending restore; own playback clears ownership."""
+    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
+        if trigger_room is None:
+            conn.execute("DELETE FROM automation_room_owners WHERE target_room = ?", (target_room,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO automation_room_owners VALUES (?, ?)",
+                         (target_room, trigger_room))
+
+
+def automation_targets(trigger_room):
+    with closing(_restore_conn()) as conn:
+        return {row[0] for row in conn.execute(
+            "SELECT target_room FROM automation_room_owners WHERE trigger_room = ?", (trigger_room,))}
+
+
+def automation_sources():
+    with closing(_restore_conn()) as conn:
+        return {row[0] for row in conn.execute("SELECT DISTINCT trigger_room FROM automation_room_owners")}
 
 
 def rooms_with_restore_records():
