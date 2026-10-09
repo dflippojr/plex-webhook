@@ -73,9 +73,15 @@ sharing the **receipt's `correlation_id`** and one `detail.action_id`:
 1. `light.action_queued` (`queued/accepted`, target = room key): written when the work is
    queued, with a snapshot of the resolved lights and brightness levels. A config reload
    afterwards does not change a queued action.
-2. `light.result` per light (target = configured light ID), in order. A failing light never
+2. `light.decision` per light that has a brightness decision (target = configured light
+   ID), before its result: outcome `restored`, `skipped_manual_change` (`brightness_changed`
+   or `turned_off`), `skipped_was_off` or `restore_without_read` on restore, and
+   `dim_recorded`, `dim_skipped_off` or `dim_kept_original` on dim. `detail` carries
+   `dim_percent`, `restore_percent` and `observed_percent` (null when unknown). The queued
+   record's `brightness` is the dim level, or null for a restore (read per light at run time).
+3. `light.result` per light (target = configured light ID), in order. A failing light never
    stops later lights or actions.
-3. `light.action_summary` (target = room key): the terminal record. Without it the action
+4. `light.action_summary` (target = room key): the terminal record. Without it the action
    is **incomplete** (for example after abrupt termination); commands are never replayed on
    restart and success is never synthesized.
 
@@ -90,7 +96,7 @@ Outcomes are transport evidence, **never observed bulb state**:
 | `request_accepted_by_transport` | cloud HTTP completed, or the local/cloud Tuya reply held no error |
 | `unconfirmed` | a call returned but nothing establishes acceptance (no fallback is attempted) |
 | `failed` | every attempt errored or was explicitly rejected (`tuya_rejected`) |
-| `skipped` | nothing could be tried (`unsupported_brand`, `missing_credentials`, `missing_model`, `no_address`, `library_unavailable`) |
+| `skipped` | nothing was sent: `light_off`, `manual_change` or `no_record` (decided not to touch the light), or nothing could be tried (`unsupported_brand`, `missing_credentials`, `missing_model`, `no_address`, `library_unavailable`) |
 
 `detail` also holds the selected `transport` (`lan`, `local`, `cloud`, `none`), the
 `credential_source` kind (`environment`, `device_config`, `none`, never a value),
