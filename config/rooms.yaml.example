@@ -13,6 +13,20 @@
 # in config/devices.secrets.yaml (also gitignored - see
 # config/devices.secrets.yaml.example) keyed by this same light `id`.
 #
+# One room per Plex player: `plex_clients` must hold exactly one entry, and a
+# light `id` may appear in only one room. Several players in the same physical
+# space need several rooms, each with its own lights; rooms do not influence
+# each other. A config that breaks this is rejected on validate/reload.
+#
+# Optional per room: `dim_brightness_percent` (integer 1-100, default 20) and
+# `restore_brightness_percent` (integer 1-100, default 100). Each light is
+# restored to the brightness it had before dimming; the restore percent is only
+# the fallback when that brightness could not be read. A light that was off is
+# left off, and one changed by hand while dimmed is left alone.
+#
+# Optional per Tuya light: `switch_dp` (default 1) and `brightness_dp` (default
+# 3). These data points are unverified on real hardware (issue #4).
+#
 # Optional `model` field (Govee only): the device SKU (e.g. "H6159"),
 # found in the Govee Home app under the device's settings. Only needed
 # for Govee Cloud API fallback control - not required for LAN control.
@@ -20,12 +34,14 @@
 rooms:
   living_room:
     name: "Living Room"
+    dim_brightness_percent: 20
+    restore_brightness_percent: 100
     plex_clients:
       - title: "TODO: e.g. Living Room Apple TV"
         uuid: null
     lights:
       - brand: govee   # govee | tuya
-        id: "TODO-device-id"
+        id: "TODO-living-room-device-id"
         name: "TODO-light-name"
         model: "TODO-govee-sku"   # optional, e.g. "H6159" - cloud fallback only
 
@@ -36,5 +52,7 @@ rooms:
         uuid: null
     lights:
       - brand: tuya
-        id: "TODO-device-id"
+        id: "TODO-bedroom-device-id"
         name: "TODO-light-name"
+        # switch_dp: 1
+        # brightness_dp: 3

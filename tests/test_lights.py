@@ -262,8 +262,8 @@ def test_tuya_unexpected_error_is_caught(monkeypatch, caplog):
 
 def test_apply_action_routes_by_brand(monkeypatch, caplog):
     seen = []
-    monkeypatch.setitem(lights._controllers, "govee", types.SimpleNamespace(apply=lambda a, l: seen.append(("govee", a))))
-    monkeypatch.setitem(lights._controllers, "tuya", types.SimpleNamespace(apply=lambda a, l: seen.append(("tuya", a))))
+    monkeypatch.setitem(lights._controllers, "govee", types.SimpleNamespace(apply=lambda a, l, b=None: seen.append(("govee", a))))
+    monkeypatch.setitem(lights._controllers, "tuya", types.SimpleNamespace(apply=lambda a, l, b=None: seen.append(("tuya", a))))
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         lights.apply_action("dim", [GOVEE, TUYA, {"brand": "hue", "id": "x"}])
     assert seen == [("govee", "dim"), ("tuya", "dim")]

@@ -8,6 +8,10 @@ logger = logging.getLogger("plex-webhook")
 CONFIG_PATH = Path(os.environ.get("ROOMS_CONFIG_PATH", "/config/rooms.yaml"))
 
 
+DEFAULT_DIM_PERCENT = 20
+DEFAULT_RESTORE_PERCENT = 100
+
+
 class RoomConfigError(ValueError):
     """Only sanitized paths and codes may cross the API/logging boundary."""
 
@@ -24,7 +28,8 @@ def _key_path(path, key):
     # Room names locate errors; arbitrary extension keys are redacted.
     if path == "rooms" and isinstance(key, str):
         return f"rooms.{key}"
-    if key in ("rooms", "plex_clients", "lights", "uuid", "title", "brand", "id", "name", "model"):
+    if key in ("rooms", "plex_clients", "lights", "uuid", "title", "brand", "id", "name", "model",
+               "dim_brightness_percent", "restore_brightness_percent", "switch_dp", "brightness_dp"):
         return str(key) if path == "$" else f"{path}.{key}"
     return f"{path}.[key]"
 
@@ -91,6 +96,16 @@ def _string(entry, field, path, required=False):
     return value
 
 
+def _integer(entry, field, path, low, high):
+    """Optional whole number in [low, high]; booleans are not numbers here."""
+    value = entry.get(field)
+    if field in entry and (type(value) is not int or not low <= value <= high):
+        raise RoomConfigError([{"path": f"{path}.{field}", "code": "expected_percent" if high == 100 else "expected_integer"}])
+
+
+ONE_PLAYER_HINT = "Create one room per Plex player and put each light in the room it belongs to."
+
+
 def _index_client(index, origins, value, room_key, path):
     if not value:
         return
@@ -108,13 +123,16 @@ def _validate(data):
     rooms = data.get("rooms", {})
     _mapping(rooms, "rooms")
     uuid_index, title_index = {}, {}
-    uuid_origins, title_origins = {}, {}
+    uuid_origins, title_origins, light_origins = {}, {}, {}
     for room_key, room in rooms.items():
         if not isinstance(room_key, str):
             raise RoomConfigError([{"path": "rooms.[key]", "code": "expected_string"}])
         path = f"rooms.{room_key}"
         _mapping(room, path)
-        for client, client_path in _entries(room, "plex_clients", path):
+        clients = list(_entries(room, "plex_clients", path))
+        for field in ("dim_brightness_percent", "restore_brightness_percent"):
+            _integer(room, field, path, 1, 100)
+        for client, client_path in clients:
             uuid = _string(client, "uuid", client_path)
             title = _string(client, "title", client_path)
             _index_client(uuid_index, uuid_origins, uuid, room_key, f"{client_path}.uuid")
@@ -125,6 +143,18 @@ def _validate(data):
                 _string(light, field, light_path, required=True)
             for field in ("name", "model"):
                 _string(light, field, light_path)
+            for field in ("switch_dp", "brightness_dp"):
+                _integer(light, field, light_path, 1, 255)
+            light_id = light["id"]
+            if light_id in light_origins:
+                raise RoomConfigError([
+                    {"path": light_origins[light_id], "code": "light_in_multiple_rooms",
+                     "hint": "A light belongs to exactly one room; give each room its own lights."},
+                    {"path": f"{light_path}.id", "code": "light_in_multiple_rooms"},
+                ])
+            light_origins[light_id] = f"{light_path}.id"
+        if len(clients) != 1:
+            raise RoomConfigError([{"path": f"{path}.plex_clients", "code": "expected_one_player", "hint": ONE_PLAYER_HINT}])
     return rooms, uuid_index, title_index
 
 
@@ -172,6 +202,12 @@ class RoomRegistry:
         if title:
             return title_index.get(title.strip().lower())
         return None
+
+    def settings_for(self, room_key: str) -> dict:
+        """Dim level and restore fallback in percent, with defaults for omitted fields."""
+        room = self.rooms.get(room_key) or {}
+        return {"dim": room.get("dim_brightness_percent", DEFAULT_DIM_PERCENT),
+                "restore": room.get("restore_brightness_percent", DEFAULT_RESTORE_PERCENT)}
 
     def lights_for(self, room_key: str) -> list:
         return self.rooms.get(room_key, {}).get("lights", [])

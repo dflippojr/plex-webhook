@@ -42,7 +42,9 @@ def lan(monkeypatch):
         state.sent.append(message["msg"]["cmd"])
 
     monkeypatch.setattr(lights.GoveeController, "_send_lan_command", send)
-    monkeypatch.setattr(lights.GoveeController, "_discover_ip", lambda self, device_id: None)
+    monkeypatch.setattr(lights.GoveeController, "_discover_ip", lambda self, device_id, timeout=None: None)
+    state.reading = lights.StateReading.failed()
+    monkeypatch.setattr(lights.GoveeController, "_read_lan", lambda self, light, timeout: state.reading)
     return state
 
 
@@ -191,26 +193,25 @@ def test_sequence_links_receipt_queue_results_and_summary(client, real_lights, l
     for receipt, request in zip(receipts, ["dim", "restore", "dim", "restore"]):
         chain = [r for r in log if r["correlation_id"] == receipt["correlation_id"]]
         assert [r["action"] for r in chain] == [
-            "webhook.receipt", "light.action_queued", "light.result", "light.action_summary"]
+            "webhook.receipt", "light.action_queued", "light.decision", "light.result", "light.action_summary"]
         assert [r["id"] for r in chain] == sorted(r["id"] for r in chain)
-        queued, result, summary = chain[1:]
+        queued, _decision, result, summary = chain[1:]
         assert {r["detail"]["action_id"] for r in chain[1:]} == {queued["detail"]["action_id"]}
         uuid.UUID(queued["detail"]["action_id"])
         assert queued["detail"]["request"] == request
         assert queued["detail"]["event_id"] == int(receipt["target_id"])
         assert queued["detail"]["targets"] == [
-            {"brand": "govee", "id": "AA:BB", "brightness": 20 if request == "dim" else 100}]
+            {"brand": "govee", "id": "AA:BB", "brightness": 20 if request == "dim" else None}]
         assert queued["detail"]["on_behalf_of"] == {"kind": "plex_server", "id": "plex-server", "verified": 0}
         assert (result["target_id"], result["outcome"]) == ("AA:BB", "command_sent")
         assert (summary["outcome"], summary["reason_code"]) == ("completed_unverified", "all_sent")
         assert all(r["checksum"] == audit.checksum(r) for r in chain)
 
 
-def test_two_clients_keep_first_dim_last_restore_in_order(client, real_lights, lan):
-    post(client, payload("media.play", title="Bedroom Phone", uuid="uuid-bed-phone"))
+def test_pause_then_stop_queues_one_dim_and_one_restore_in_order(client, real_lights, lan):
     post(client, payload("media.play", title="Bedroom Apple TV"))
+    post(client, payload("media.pause", title="Bedroom Apple TV"))
     post(client, payload("media.stop", title="Bedroom Apple TV"))
-    post(client, payload("media.stop", title="Bedroom Phone", uuid="uuid-bed-phone"))
     drain()
     queued = [r for r in rows(client) if r["action"] == "light.action_queued"]
     assert [r["detail"]["request"] for r in queued] == ["dim", "restore"]

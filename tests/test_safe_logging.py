@@ -53,7 +53,7 @@ def test_public_wrapper_and_later_light(monkeypatch, caplog, brand):
     sentinel = "synthetic-wrapper-" + brand
     calls = []
 
-    def apply(action, light):
+    def apply(action, light, brightness=None):
         calls.append(light["id"])
         if light["id"] == "first":
             raise RuntimeError(sentinel)

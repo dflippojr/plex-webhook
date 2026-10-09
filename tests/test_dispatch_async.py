@@ -41,7 +41,7 @@ def test_slow_action_does_not_delay_health(monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
-    def slow_apply(action, room_lights):
+    def slow_apply(action, room_lights, brightness=None):
         started.set()
         release.wait(timeout=30)
 
@@ -62,7 +62,7 @@ def test_slow_action_does_not_delay_health(monkeypatch):
 def test_events_for_one_room_apply_in_order(monkeypatch):
     applied = []
 
-    def record(action, room_lights):
+    def record(action, room_lights, brightness=None):
         if action == "dim":
             time.sleep(0.3)  # a slow dim must not be overtaken by the restore
         applied.append(action)
@@ -78,7 +78,7 @@ def test_events_for_one_room_apply_in_order(monkeypatch):
 def test_controller_exception_does_not_break_webhook_or_later_actions(monkeypatch):
     applied = []
 
-    def flaky(action, room_lights):
+    def flaky(action, room_lights, brightness=None):
         if action == "dim":
             raise RuntimeError("bulb unreachable")
         applied.append(action)
@@ -94,7 +94,7 @@ def test_controller_exception_does_not_break_webhook_or_later_actions(monkeypatc
 def test_success_counter_increments_after_action_applied(monkeypatch):
     sample = {"room": ROOM, "action": "dim"}
     before = dispatcher.DISPATCH_ACTIONS_TOTAL.labels(**sample)._value.get()
-    monkeypatch.setattr(lights, "apply_action", lambda action, room_lights: None)
+    monkeypatch.setattr(lights, "apply_action", lambda action, room_lights, brightness=None: None)
     post_event(TestClient(main.app), "media.play")
     drain()
     assert dispatcher.DISPATCH_ACTIONS_TOTAL.labels(**sample)._value.get() == before + 1

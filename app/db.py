@@ -1,8 +1,9 @@
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
-from app.audit import WRITE_LOCK
+from app.audit import WRITE_LOCK, utc_now
 
 DB_PATH = Path(os.environ.get("DB_PATH", "/data/plex_events.db"))
 
@@ -20,6 +21,15 @@ CREATE TABLE IF NOT EXISTS events (
     rating_key TEXT,
     raw_payload TEXT NOT NULL,
     raw_truncated INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS light_restore_records (
+    room TEXT NOT NULL,
+    light_id TEXT NOT NULL,
+    was_off INTEGER NOT NULL CHECK(was_off IN (0, 1)),
+    restore_percent INTEGER,
+    dim_percent INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (room, light_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
@@ -109,3 +119,41 @@ def list_known_clients(conn):
         {"title": row[0], "uuid": row[1], "event_count": row[2], "last_seen": row[3]}
         for row in rows
     ]
+
+
+# --- light restore records ----------------------------------------------------
+# One row per (room, light) between a dim and its restore. Each call owns its
+# connection so the light-action worker never shares the request connection.
+
+
+def _restore_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.executescript(SCHEMA)
+    return conn
+
+
+def get_restore_record(room, light_id):
+    with closing(_restore_conn()) as conn:
+        row = conn.execute(
+            "SELECT was_off, restore_percent, dim_percent FROM light_restore_records WHERE room = ? AND light_id = ?",
+            (room, light_id),
+        ).fetchone()
+    return {"was_off": bool(row[0]), "restore_percent": row[1], "dim_percent": row[2]} if row else None
+
+
+def put_restore_record(room, light_id, was_off, restore_percent, dim_percent):
+    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO light_restore_records VALUES (?, ?, ?, ?, ?, ?)",
+            (room, light_id, 1 if was_off else 0, restore_percent, dim_percent, utc_now()),
+        )
+
+
+def delete_restore_record(room, light_id):
+    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
+        conn.execute("DELETE FROM light_restore_records WHERE room = ? AND light_id = ?", (room, light_id))
+
+
+def rooms_with_restore_records():
+    with closing(_restore_conn()) as conn:
+        return {row[0] for row in conn.execute("SELECT DISTINCT room FROM light_restore_records")}

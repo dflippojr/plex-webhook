@@ -103,14 +103,19 @@ Paths identify the field to fix (`$` means the document root). Codes include
 `invalid_yaml`, `recursive_yaml`, `duplicate_key`, `expected_mapping`,
 `expected_list`, `expected_string`, `expected_string_or_null`, and
 `expected_nonempty_string`. `conflicting_client` reports both entries when a
-UUID or a trimmed, lowercase nonempty title belongs to different rooms.
-Repeated identifiers within a single room are allowed; UUID matches take
-precedence over titles. Errors omit client identifiers, light values, YAML
+UUID or a trimmed, lowercase nonempty title belongs to different rooms;
+UUID matches take precedence over titles. `expected_one_player` rejects a room
+whose `plex_clients` does not hold exactly one entry (the error says to create one
+room per player). `light_in_multiple_rooms` reports both paths when a light `id`
+appears more than once. `expected_percent` / `expected_integer` reject a
+brightness or data-point value that is not a whole number in range (booleans and
+strings are not numbers). Errors omit client identifiers, light values, YAML
 source fragments, and filesystem details.
 
 The root, `rooms`, and each room must be mappings. When present, `plex_clients`
 and `lights` must be lists of mappings. Client UUID/title and optional light
 name/model accept strings or null; light brand/id require nonempty strings.
+Each room has exactly one Plex player, and each light belongs to exactly one room.
 Extra fields and unknown light brands are preserved. Empty files, omitted
 `rooms`, and `rooms: {}` are valid empty configurations.
 
@@ -199,7 +204,15 @@ rooms:
       - brand: govee
         id: "device-id-once-known"
         name: "Couch Lamp"
+    dim_brightness_percent: 20          # optional, integer 1-100, default 20
+    restore_brightness_percent: 100     # optional, integer 1-100, default 100 (fallback only)
 ```
+
+**One room per Plex player, and lights are not shared.** A room's `plex_clients`
+must hold exactly one entry, and a light `id` may appear in only one room. Several
+players in the same physical space need several rooms, each with its own lights;
+rooms do not influence each other. A config that breaks these rules is rejected on
+validate/reload, the previous mapping is kept, and the error names the field path.
 
 Workflow to fill it in: play something on the target device, hit
 `GET /clients` (admin token) to read off its real `title`/`uuid`, add it under the right
@@ -214,12 +227,34 @@ curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.
 Fix any reported errors and validate again before reloading. Do not
 commit that file.
 
-Dispatch logic (`app/dispatcher.py`): a room tracks the set of clients
-currently playing in it. The first client to start playing triggers a
-`dim` action for every light in that room; the last client to
-pause/stop triggers `restore`. Multiple simultaneous clients in the same
-room are handled correctly (lights only restore once *all* of them have
-stopped).
+Dispatch logic (`app/dispatcher.py`): the room's player starting triggers a `dim`
+action for the room's lights; pause/stop triggers `restore`.
+
+**Brightness.** All comparisons are in percent (Tuya's 10-1000 scale is converted;
+Govee is already percent).
+
+- *On dim*, each light is read first (on/off and brightness, 2 s per light, override
+  with `LIGHT_READ_TIMEOUT_S`). An **on** light has its brightness stored as its restore
+  value and is dimmed to the room's `dim_brightness_percent`. An **off** light is
+  recorded as `was_off` and left off; a light is never turned on to dim it. If the read
+  fails the light is still dimmed and the room's `restore_brightness_percent` is its
+  restore value. A value equal to the dim level is never stored, and a re-dim before a
+  pending restore keeps the original value.
+- *On restore*, each recorded light is read again. If it is now off, or its brightness
+  differs from the dim level by **more than 5 points**, it was changed by hand and is
+  left alone; within 5 points (inclusive) it is set to its stored value. If that read
+  fails it is restored anyway. The record is cleared after the decision.
+- Records live in the `light_restore_records` table of the SQLite database keyed by room
+  and light id, so a restart between dim and restore still restores (the next
+  pause/stop of that room's player triggers it).
+- Reads: Govee LAN `devStatus`, then the Govee cloud state API (needs `GOVEE_API_KEY` and
+  the light's `model`); Tuya local `status()`, then the Tuya cloud status API.
+- Tuya data points are **unverified on real hardware ([#4](https://github.com/dflippojr/plex-webhook/issues/4))**: the switch
+  and brightness data points default to 1 and 3 and can be overridden per light with
+  `switch_dp` / `brightness_dp`. The cloud API uses the fixed codes `switch_1` and
+  `bright_value_v2`.
+- Every decision is an audit record (`light.decision`) and is counted in
+  `plex_dispatcher_light_decisions_total{room,decision}`.
 
 Light actions run on a single background worker thread, in arrival order, so a slow
 or unreachable light never blocks `/health`, `/metrics` or the next webhook; a failed
@@ -243,7 +278,8 @@ set up a Tuya IoT Platform project + run `tinytuya wizard` to get local
 keys for your devices.
 
 Dispatcher activity is also exported as Prometheus metrics
-(`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`)
+(`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`,
+`plex_dispatcher_light_decisions_total`)
 and shown on the same Grafana dashboard. `plex_dispatcher_actions_total` counts
 dispatcher calls that completed; it is **not** a verified per-device success counter
 (a call where every light was skipped or failed still counts). Per-light results are in

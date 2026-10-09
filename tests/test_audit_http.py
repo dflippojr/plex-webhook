@@ -44,7 +44,7 @@ def test_receipt_privacy_headers_payload_attachments_export(client, caplog):
 
 
 def test_reload_validation_results_and_changes(client, rooms_file, registry):
-    rooms_file.write_text("rooms: {SECRET: {SECRET: SECRET, lights: [{brand: SECRET, id: SECRET}]}}", encoding="utf-8")
+    rooms_file.write_text("rooms: {SECRET: {SECRET: SECRET, plex_clients: [{title: x}], lights: [{brand: SECRET, id: SECRET}]}}", encoding="utf-8")
     assert client.post("/rooms/validate").status_code == 200
     assert client.post("/rooms/reload").status_code == 200
     assert client.post("/rooms/reload").status_code == 200
@@ -57,7 +57,7 @@ def test_reload_validation_results_and_changes(client, rooms_file, registry):
     assert all(row["target_kind"] == "rooms" and row["target_id"] is None for row in rows(client))
     assert "SECRET" not in json.dumps(rows(client))
     before = registry._state
-    rooms_file.write_text("rooms: {SECRET: {lights: [{id: SECRET}]}}", encoding="utf-8")
+    rooms_file.write_text("rooms: {SECRET: {plex_clients: [{title: x}], lights: [{id: SECRET}]}}", encoding="utf-8")
     assert client.post("/rooms/reload").status_code == 422
     assert registry._state is before
     assert rows(client)[-1]["reason_code"] == "invalid_config"
@@ -83,13 +83,13 @@ def test_audit_failure_does_not_block_or_retry(client, rooms_file, monkeypatch, 
         drain()
         assert light_calls == [("dim", ["AA:BB"])]
     else:
-        rooms_file.write_text("rooms: {SECRET: {}}", encoding="utf-8")
+        rooms_file.write_text("rooms: {SECRET: {plex_clients: [{title: x}]}}", encoding="utf-8")
         response = client.post("/" + endpoint)
         if endpoint.endswith("reload"):
             assert list(main.registry.rooms) == ["SECRET"]
     assert response.status_code == 200
-    # The webhook also tries its queued and summary records; each failure is counted, none retried.
-    expected = 3 if endpoint == "webhook" else 1
+    # The webhook also tries its queued, decision and summary records; each failure is counted, none retried.
+    expected = 4 if endpoint == "webhook" else 1
     assert len(calls) == expected
     assert REGISTRY.get_sample_value(metric) == before + expected
     assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text.split("reason=audit_write_failed")[-1]
@@ -99,7 +99,7 @@ def test_locked_database_fail_open_reload(client, rooms_file, caplog):
     path = client.conn.execute("PRAGMA database_list").fetchone()[2]
     with sqlite3.connect(path) as locked:
         locked.execute("BEGIN IMMEDIATE")
-        rooms_file.write_text("rooms: {den: {}}", encoding="utf-8")
+        rooms_file.write_text("rooms: {den: {plex_clients: [{title: x}]}}", encoding="utf-8")
         assert client.post("/rooms/reload").status_code == 200
     assert "reason=audit_write_failed" in caplog.text
 
@@ -116,7 +116,7 @@ def test_bad_form_audited_safely(client, monkeypatch):
 
 
 @pytest.mark.parametrize("source,outcome,reason", [
-    ("rooms: {SECRET: {}}", "activated", "loaded"),
+    ("rooms: {SECRET: {plex_clients: [{title: x}]}}", "activated", "loaded"),
     ("rooms: {SECRET: {lights: [{id: SECRET}]}}", "rejected", "invalid_config"),
     (None, "rejected", "config_unavailable"),
 ])
