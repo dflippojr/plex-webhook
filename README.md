@@ -32,6 +32,20 @@ transitive package with hashes. After editing the direct pins in
 `requirements.txt`, regenerate it with `./scripts/lock_requirements.sh`
 (needs Docker) and commit both files.
 
+## Govee LAN setup
+
+**For Docker bridge networking, reserve each Govee bulb's address in DHCP and
+set its static `ip` in `config/devices.secrets.yaml`.** Multicast discovery may
+not reach bulbs across Docker networks, VLANs, or AP isolation. A configured
+static IP skips discovery. Start from
+[`config/devices.secrets.yaml.example`](config/devices.secrets.yaml.example)
+and follow [the LAN Control setup](SETUP.md#2-enable-govee-lan-control-primary-per-device).
+
+Discovery accepts only a private (RFC 1918) IPv4 literal matching the reply's
+source address. Malformed or invalid replies are ignored; if discovery finds
+no usable address, control falls back to the cloud when `GOVEE_API_KEY` and
+the light's `model` are configured.
+
 ## Configure in Plex
 
 Plex web UI → Settings → Account → Webhooks → Add Webhook:

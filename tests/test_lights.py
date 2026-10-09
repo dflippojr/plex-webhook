@@ -28,6 +28,7 @@ class FakeSocket:
     instances = []
     replies = []
     fail_send = False
+    source_ip = "10.0.0.9"
 
     def __init__(self, *args, **kwargs):
         self.sent = []
@@ -51,7 +52,7 @@ class FakeSocket:
     def recvfrom(self, size):
         if not FakeSocket.replies:
             raise socket.timeout()
-        return FakeSocket.replies.pop(0), ("10.0.0.9", 4002)
+        return FakeSocket.replies.pop(0), (FakeSocket.source_ip, 4002)
 
     def close(self):
         self.closed = True
@@ -60,6 +61,7 @@ class FakeSocket:
 @pytest.fixture
 def fake_socket(monkeypatch):
     FakeSocket.instances, FakeSocket.replies, FakeSocket.fail_send = [], [], False
+    FakeSocket.source_ip = "10.0.0.9"
     monkeypatch.setattr(lights.socket, "socket", FakeSocket)
     return FakeSocket
 
@@ -93,9 +95,99 @@ def test_govee_restore_brightness(fake_socket, secrets):
 
 
 def test_govee_lan_discovery(fake_socket):
-    fake_socket.replies = [b"garbage", scan_reply("OTHER", "10.0.0.1"), scan_reply("AA:BB", "10.0.0.7")]
+    fake_socket.replies = [b"garbage", scan_reply("OTHER", "10.0.0.1"), scan_reply("AA:BB", "10.0.0.9")]
     lights.GoveeController().apply("dim", GOVEE)
-    assert commands(fake_socket)[0] == ("turn", 1, ("10.0.0.7", 4003))
+    assert commands(fake_socket)[0] == ("turn", 1, ("10.0.0.9", 4003))
+
+
+MALFORMED_SCAN_REPLIES = [
+    b"null", b"[]", b'"text"', b"42", b"true", b"{}",
+    b'{"msg": null}', b'{"msg": []}', b'{"msg": "text"}', b'{"msg": 42}',
+    b'{"msg": {}}', b'{"msg": {"data": null}}', b'{"msg": {"data": []}}',
+    b'{"msg": {"data": "text"}}', b'{"msg": {"data": 42}}',
+    b'{"msg": {"data": {}}}', b'{"msg": {"data": {"device": "AA:BB"}}}',
+    pytest.param(b"[" * 1500 + b"0" + b"]" * 1500, id="deeply-nested"),
+    b"garbage", b"\xff",
+]
+
+
+@pytest.mark.parametrize("reply", MALFORMED_SCAN_REPLIES)
+def test_govee_discovery_ignores_malformed_reply(fake_socket, reply):
+    fake_socket.replies = [reply]
+    assert lights.GoveeController()._discover_ip(GOVEE["id"]) is None
+    assert all(s.closed for s in fake_socket.instances)
+
+
+@pytest.mark.parametrize("ip,source_ip", [
+    ("10.0.0.8", "10.0.0.9"), ("8.8.8.8", "8.8.8.8"),
+    ("127.0.0.1", "127.0.0.1"), ("169.254.1.2", "169.254.1.2"),
+    ("0.0.0.0", "0.0.0.0"), ("192.0.2.1", "192.0.2.1"),
+    ("239.255.255.250", "239.255.255.250"), ("255.255.255.255", "255.255.255.255"),
+    ("fc00::1", "fc00::1"), ("lamp.local", "lamp.local"),
+    ("10.0.0.9/24", "10.0.0.9/24"), ("010.0.0.9", "010.0.0.9"),
+    (" 10.0.0.9", " 10.0.0.9"), ("", "10.0.0.9"),
+    (None, "10.0.0.9"), (42, "10.0.0.9"), (True, "10.0.0.9"),
+    ([], "10.0.0.9"), ({}, "10.0.0.9"),
+])
+def test_govee_discovery_ignores_invalid_address(fake_socket, ip, source_ip):
+    fake_socket.source_ip = source_ip
+    fake_socket.replies = [scan_reply(GOVEE["id"], ip)]
+    assert lights.GoveeController()._discover_ip(GOVEE["id"]) is None
+    assert commands(fake_socket) == []
+    assert all(s.closed for s in fake_socket.instances)
+
+
+@pytest.mark.parametrize("ip", ["10.0.0.9", "172.16.0.9", "192.168.1.9"])
+def test_govee_discovery_accepts_private_source_address(fake_socket, ip):
+    fake_socket.source_ip = ip
+    fake_socket.replies = [scan_reply(GOVEE["id"], ip)]
+    assert lights.GoveeController()._discover_ip(GOVEE["id"]) == ip
+    assert all(s.closed for s in fake_socket.instances)
+
+
+def test_govee_discovery_ignores_decoder_recursion_error(fake_socket, monkeypatch):
+    fake_socket.replies = [b"deeply nested JSON"]
+    # Decoder depth limits vary by interpreter and test runner.
+    original_loads = json.loads
+
+    def decode(data):
+        if data == "deeply nested JSON":
+            raise RecursionError("maximum recursion depth exceeded")
+        return original_loads(data)
+
+    monkeypatch.setattr(lights.json, "loads", decode)
+    assert lights.GoveeController()._discover_ip(GOVEE["id"]) is None
+    assert all(s.closed for s in fake_socket.instances)
+
+
+def test_govee_discovery_continues_after_invalid_replies(fake_socket):
+    fake_socket.replies = [b"null", b'{"msg": {"data": []}}'] + [
+        scan_reply(GOVEE["id"], "10.0.0.8"), scan_reply(GOVEE["id"], "10.0.0.9"),
+    ]
+    assert lights.GoveeController()._discover_ip(GOVEE["id"]) == "10.0.0.9"
+
+
+@pytest.mark.parametrize("reply", MALFORMED_SCAN_REPLIES)
+def test_govee_malformed_discovery_falls_back_to_cloud(fake_socket, monkeypatch, reply):
+    fake_socket.replies = [reply]
+    monkeypatch.setenv("GOVEE_API_KEY", "dummy-key")
+    puts = []
+
+    def fake_put(url, headers, json, timeout):
+        puts.append((url, headers["Govee-API-Key"], json["cmd"]))
+        return types.SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr(requests, "put", fake_put)
+    result = lights.GoveeController().apply("dim", GOVEE)
+    assert puts == [
+        (lights.GOVEE_CLOUD_API_URL, "dummy-key", {"name": "turn", "value": "on"}),
+        (lights.GOVEE_CLOUD_API_URL, "dummy-key", {"name": "brightness", "value": 20}),
+    ]
+    assert result.transport == "cloud"
+    assert result.outcome == "request_accepted_by_transport"
+    assert result.attempts[0].reason == "no_address"
+    assert commands(fake_socket) == []
+    assert all(s.closed for s in fake_socket.instances)
 
 
 def test_govee_falls_back_to_cloud_when_lan_fails(fake_socket, secrets, monkeypatch):
