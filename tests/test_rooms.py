@@ -1,7 +1,7 @@
 from conftest import payload
 import pytest
 
-from app.rooms import RoomConfigError, RoomConfigUnavailable, RoomRegistry
+from app.rooms import EMPTY_STATE, RoomConfigError, RoomConfigUnavailable, RoomRegistry
 
 
 def test_resolves_by_uuid(registry):
@@ -143,7 +143,7 @@ rooms:
 def test_invalid_startup_is_sanitized(rooms_file, caplog):
     rooms_file.write_text("rooms: [private-value", encoding="utf-8")
     reg = RoomRegistry(rooms_file)
-    assert reg._state == ({}, {}, {}, [])
+    assert reg._state == EMPTY_STATE
     assert "invalid_yaml" in caplog.text
     assert "private-value" not in caplog.text
 

@@ -84,7 +84,7 @@ def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, mon
     post(client, payload("media.play", uuid="uuid-living"))
     drain()
     before = registry._state
-    active = {key: set(value) for key, value in dispatcher._active_clients.items()}
+    active = {key: dict(value) for key, value in dispatcher._active_clients.items()}
     metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
     calls = list(light_calls)
     def unexpected():
@@ -114,7 +114,7 @@ def test_invalid_room_endpoints_preserve_dispatch(client, registry, rooms_file, 
     post(client, payload("media.play", uuid="uuid-living"))
     drain()
     before = registry._state
-    active = {key: set(value) for key, value in dispatcher._active_clients.items()}
+    active = {key: dict(value) for key, value in dispatcher._active_clients.items()}
     metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
     calls = list(light_calls)
     def unexpected():

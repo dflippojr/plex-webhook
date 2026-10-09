@@ -57,6 +57,18 @@ rooms:
         # switch_dp: 1
         # brightness_dp: 3
 
+# Optional: minutes after a play/resume with no pause/stop before the room is
+# restored anyway, when the payload has no media duration (integer 1-10080,
+# default 360 = 6 hours). With a duration, the expiry is five minutes past the
+# remaining runtime.
+# playback_idle_minutes: 360
+
+# Optional: accept events only from these Plex servers (`Server.uuid`, the
+# server's machineIdentifier). Other events are stored and counted but never
+# dispatched. Omit or leave null to accept every server; an empty list is rejected.
+# allowed_server_uuids:
+#   - "TODO-plex-server-uuid"
+
 # Optional cross-room rules; leave empty for independent rooms.
 # Triggers: dim (play/resume), restore (pause/stop). Action: integer 1-100 or restore.
 # Active playback in the target always wins; the latest automation owns its restore.

@@ -10,6 +10,9 @@ CONFIG_PATH = Path(os.environ.get("ROOMS_CONFIG_PATH", "/config/rooms.yaml"))
 
 DEFAULT_DIM_PERCENT = 20
 DEFAULT_RESTORE_PERCENT = 100
+# A play with no matching pause/stop and no usable media duration stops counting after this long.
+DEFAULT_PLAYBACK_IDLE_MINUTES = 6 * 60
+MAX_PLAYBACK_IDLE_MINUTES = 7 * 24 * 60
 
 
 class RoomConfigError(ValueError):
@@ -30,7 +33,8 @@ def _key_path(path, key):
         return f"rooms.{key}"
     if key in ("rooms", "plex_clients", "lights", "uuid", "title", "brand", "id", "name", "model",
                "dim_brightness_percent", "restore_brightness_percent", "switch_dp", "brightness_dp",
-               "automations", "trigger", "room", "event", "target_room", "action"):
+               "automations", "trigger", "room", "event", "target_room", "action",
+               "allowed_server_uuids", "playback_idle_minutes"):
         return str(key) if path == "$" else f"{path}.{key}"
     return f"{path}.[key]"
 
@@ -163,6 +167,23 @@ def _validate_automations(data, rooms):
     return entries
 
 
+def _validate_options(data):
+    """Top-level service options; an absent or null allow-list accepts every server."""
+    minutes = data.get("playback_idle_minutes", DEFAULT_PLAYBACK_IDLE_MINUTES)
+    if type(minutes) is not int or not 1 <= minutes <= MAX_PLAYBACK_IDLE_MINUTES:
+        raise RoomConfigError([{"path": "playback_idle_minutes", "code": "expected_integer"}])
+    servers = data.get("allowed_server_uuids")
+    if servers is not None:
+        # An empty list would silently ignore every event, so it is rejected rather than honored.
+        if not isinstance(servers, list) or not servers:
+            raise RoomConfigError([{"path": "allowed_server_uuids", "code": "expected_nonempty_list"}])
+        for index, value in enumerate(servers):
+            if not isinstance(value, str) or not value.strip():
+                raise RoomConfigError([{"path": f"allowed_server_uuids[{index}]", "code": "expected_nonempty_string"}])
+        servers = frozenset(servers)
+    return {"playback_idle_minutes": minutes, "allowed_server_uuids": servers}
+
+
 def _validate(data):
     _mapping(data, "$")
     rooms = data.get("rooms", {})
@@ -200,13 +221,16 @@ def _validate(data):
             light_origins[light_id] = f"{light_path}.id"
         if len(clients) != 1:
             raise RoomConfigError([{"path": f"{path}.plex_clients", "code": "expected_one_player", "hint": ONE_PLAYER_HINT}])
-    return rooms, uuid_index, title_index, _validate_automations(data, rooms)
+    return rooms, uuid_index, title_index, _validate_automations(data, rooms), _validate_options(data)
+
+
+EMPTY_STATE = ({}, {}, {}, [], _validate_options({}))
 
 
 class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
-        self._state = ({}, {}, {}, [])
+        self._state = EMPTY_STATE
         self.load_outcome, self.load_reason = "rejected", "config_unavailable"
         try:
             self.reload()
@@ -236,13 +260,13 @@ class RoomRegistry:
 
     def reload(self):
         candidate = self.validate()
-        # One reference publishes rooms, indexes and automations together.
+        # One reference publishes rooms, indexes, automations and options together.
         self._state = candidate
         self.load_outcome, self.load_reason = "activated", "loaded"
         logger.info("loaded %d room(s)", len(self.rooms))
 
     def resolve_room(self, payload: dict) -> str | None:
-        _, uuid_index, title_index, _ = self._state
+        _, uuid_index, title_index, _, _ = self._state
         player = (payload or {}).get("Player") or {}
         uuid = player.get("uuid")
         title = player.get("title")
@@ -251,6 +275,18 @@ class RoomRegistry:
         if title:
             return title_index.get(title.strip().lower())
         return None
+
+    def playback_idle_seconds(self) -> int:
+        return self._state[4]["playback_idle_minutes"] * 60
+
+    def server_allowed(self, payload: dict) -> bool:
+        """True unless an allow-list is configured and the payload's ``Server.uuid`` is not on it."""
+        allowed = self._state[4]["allowed_server_uuids"]
+        if allowed is None:
+            return True
+        server = (payload or {}).get("Server")
+        uuid = server.get("uuid") if isinstance(server, dict) else None
+        return isinstance(uuid, str) and uuid in allowed
 
     def settings_for(self, room_key: str) -> dict:
         """Dim level and restore fallback in percent, with defaults for omitted fields."""

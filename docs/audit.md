@@ -9,7 +9,9 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
 ## What the records mean
 
 - `webhook.receipt`: `received/accepted` means the decoded payload has a usable
-  shape. `rejected` means missing payload, invalid JSON/shape or an unreadable
+  shape. `received/server_not_allowed` means the payload was stored but not
+  dispatched because `allowed_server_uuids` is set and its `Server.uuid` is not on
+  it. `rejected` means missing payload, invalid JSON/shape or an unreadable
   form. Missing/invalid payloads retain the existing HTTP 200/raw-history
   behavior; a malformed form returns sanitized HTTP 400. A rejected receipt
   never claims that an action happened. Receipt is not dispatch or light success.
@@ -85,7 +87,9 @@ sharing the **receipt's `correlation_id`** and one `detail.action_id`:
    is **incomplete** (for example after abrupt termination); commands are never replayed on
    restart and success is never synthesized.
 
-`detail.on_behalf_of` is the initiating actor (the unverified `plex-server`). The row's own
+`detail.on_behalf_of` is the initiating actor: the unverified `plex-server`, or
+`playback-expiry` for a restore the service ran because a play went stale (those
+rows carry no `event_id`). The row's own
 actor is `system`. `export` adds a `detail` object to these rows only.
 
 Outcomes are transport evidence, **never observed bulb state**:

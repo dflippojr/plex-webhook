@@ -244,6 +244,41 @@ commit that file.
 Dispatch logic (`app/dispatcher.py`): the room's player starting triggers a `dim`
 action for the room's lights; pause/stop triggers `restore`.
 
+### Stale playback expiry
+
+A play with no matching pause/stop (a dropped webhook, a player that lost power)
+cannot keep a room dimmed forever. Each play/resume sets an expiry for that player:
+five minutes past the remaining runtime when the payload carries
+`Metadata.duration` (less `Metadata.viewOffset`, capped at 24 hours), otherwise the
+idle period below. A background check every 30 seconds drops expired players; when
+a room's last player expires, the normal restore runs (restore automations
+included), audited on behalf of `playback-expiry`, and
+`plex_dispatcher_expired_players_total{room}` is incremented. A real pause/stop
+still restores immediately.
+
+```yaml
+playback_idle_minutes: 360   # optional top-level, integer 1-10080, default 360 (6 hours)
+```
+
+Player state lives in memory only, so a restart drops pending expiries; the
+room's next pause/stop still restores from its persisted records.
+
+### Optional Plex server allow-list
+
+```yaml
+allowed_server_uuids:        # optional top-level; omit (or null) to accept every server
+  - "your-plex-server-machine-identifier"
+```
+
+When set, only events whose `Server.uuid` is on the list are dispatched. Events
+from any other server, or with no `Server.uuid`, are still stored (SQLite and
+`events.jsonl`), counted in `plex_webhook_events_total` and
+`plex_webhook_unlisted_server_events_total`, and audited as
+`webhook.receipt` `received/server_not_allowed`, but never change any light. An
+empty list is rejected on validate/reload so a typo cannot silently ignore every
+event. Find your server's UUID in any captured event (`Server.uuid` in
+`events.jsonl`), or as `machineIdentifier` at `http://<plex>:32400/identity`.
+
 ### Optional cross-room automations
 
 Add a top-level `automations` list to `rooms.yaml` to make one room's playback

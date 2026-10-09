@@ -1,5 +1,8 @@
 import copy
 import logging
+import math
+import threading
+import time
 from collections import Counter as OutcomeCounter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -26,6 +29,12 @@ DISPATCH_ACTIONS_TOTAL = Counter(
     ["room", "action"],
 )
 
+EXPIRED_PLAYERS_TOTAL = Counter(
+    "plex_dispatcher_expired_players_total",
+    "Players dropped from a room's active state after a play with no matching pause/stop went stale",
+    ["room"],
+)
+
 LIGHT_DECISIONS_TOTAL = Counter(
     "plex_dispatcher_light_decisions_total",
     "Per-light brightness decisions taken when dimming and restoring",
@@ -40,8 +49,19 @@ MANUAL_CHANGE_TOLERANCE_PERCENT = 5
 # light only delays later actions, never the event loop.
 _action_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="light-action")
 
-# room_key -> set of client identifiers currently playing in that room
-_active_clients: dict[str, set] = {}
+# A play that reports its media duration expires this long after the remaining runtime.
+DURATION_GRACE_SECONDS = 5 * 60
+# Upper bound on a duration-based expiry, so an implausible duration cannot pin a room.
+MAX_DURATION_SECONDS = 24 * 60 * 60
+
+# Monotonic clock for play expiry; tests replace it with a fake.
+_clock = time.monotonic
+
+# room_key -> {client identifier: clock time after which its play is presumed over}
+_active_clients: dict[str, dict[str, float]] = {}
+
+# Webhook handling and the expiry sweep both change player state.
+_state_lock = threading.RLock()
 
 # Rooms that may still hold restore records: dimmed and not yet restored, including
 # before a restart, when the in-memory player state is gone but the records are not.
@@ -87,6 +107,43 @@ def _client_id(payload: dict) -> str:
     return player.get("uuid") or player.get("title") or "unknown"
 
 
+def _milliseconds(value):
+    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+
+
+def _expires_at(payload: dict, now: float) -> float:
+    """A few minutes past the remaining media runtime, or the configured idle period without one."""
+    metadata = payload.get("Metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    duration = _milliseconds(metadata.get("duration"))
+    if not duration:
+        return now + registry.playback_idle_seconds()
+    offset = _milliseconds(metadata.get("viewOffset"))
+    remaining = (duration - offset if offset is not None and offset < duration else duration) / 1000
+    return now + min(remaining, MAX_DURATION_SECONDS) + DURATION_GRACE_SECONDS
+
+
+def expire_idle_clients(context_factory: Callable | None = None):
+    """Drop players whose play went stale; a room whose last player expires gets the normal restore.
+
+    ``context_factory`` returns a fresh AuditContext (or None) for each restored room.
+    """
+    now = _clock()
+    with _state_lock:
+        for room_key, active in list(_active_clients.items()):
+            stale = [client_id for client_id, expires_at in active.items() if expires_at <= now]
+            if not stale:
+                continue
+            for client_id in stale:
+                del active[client_id]
+            EXPIRED_PLAYERS_TOTAL.labels(room=room_key).inc(len(stale))
+            ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
+            logger.info("room=%s reason=playback_expired players=%d", room_key, len(stale))
+            if not active:
+                _pending_rooms.discard(room_key)
+                _dispatch_lifecycle(room_key, "restore", context_factory() if context_factory else None)
+
+
 def handle_event(payload: dict, audit_context: AuditContext | None = None):
     if not payload:
         return
@@ -101,24 +158,27 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
         return
 
     client_id = _client_id(payload)
-    active = _active_clients.setdefault(room_key, set())
-    was_active = len(active) > 0
+    with _state_lock:
+        active = _active_clients.setdefault(room_key, {})
+        was_active = len(active) > 0
 
-    if event in ACTIVATE_EVENTS:
-        active.add(client_id)
-    else:
-        active.discard(client_id)
+        if event in ACTIVATE_EVENTS:
+            # Every play/resume pushes the expiry out again.
+            active[client_id] = _expires_at(payload, _clock())
+        else:
+            active.pop(client_id, None)
 
-    is_active = len(active) > 0
-    ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
+        is_active = len(active) > 0
+        ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
 
-    if not was_active and is_active:
-        _pending_rooms.add(room_key)
-        _dispatch_lifecycle(room_key, "dim", audit_context)
-    elif (was_active and not is_active) or (not was_active and event in DEACTIVATE_EVENTS and room_key in _pending_rooms):
-        # The second case: a restart lost the player state but the dim's records survived.
-        _pending_rooms.discard(room_key)
-        _dispatch_lifecycle(room_key, "restore", audit_context)
+        if not was_active and is_active:
+            _pending_rooms.add(room_key)
+            _dispatch_lifecycle(room_key, "dim", audit_context)
+        elif (was_active and not is_active) or (not was_active and event in DEACTIVATE_EVENTS
+                                                 and room_key in _pending_rooms):
+            # The second case: a restart lost the player state but the dim's records survived.
+            _pending_rooms.discard(room_key)
+            _dispatch_lifecycle(room_key, "restore", audit_context)
 
 
 def _dispatch_lifecycle(room_key, action, context):
