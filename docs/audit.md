@@ -87,6 +87,12 @@ sharing the **receipt's `correlation_id`** and one `detail.action_id`:
    is **incomplete** (for example after abrupt termination); commands are never replayed on
    restart and success is never synthesized.
 
+An action dropped before it started has only the queued record and a `skipped` summary
+with no decisions or results: `superseded` when a newer action for the same room replaced
+it, `queue_overflow` when the bounded queue pushed it out. An automation that yields to its
+target room's own playback is summarized as `skipped/own_playback_active`. Queued automation
+batches write nothing until they run, so a dropped batch leaves no record.
+
 `detail.on_behalf_of` is the initiating actor: the unverified `plex-server`, or
 `playback-expiry` for a restore the service ran because a play went stale (those
 rows carry no `event_id`). The row's own

@@ -91,7 +91,8 @@ OPERATIONS = {
     "light.action_summary": ("dispatcher", "system", "room", {
         "completed_unverified": {"all_sent"}, "partial": {"mixed_results"},
         "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
-        "failed": {"all_failed", "dispatcher_error"}, "skipped": {"all_skipped", "no_lights"},
+        "failed": {"all_failed", "dispatcher_error"},
+        "skipped": {"all_skipped", "no_lights", "own_playback_active", "superseded", "queue_overflow"},
     }),
 }
 LIGHT_REQUESTS = {"dim", "restore"}

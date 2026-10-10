@@ -359,7 +359,14 @@ Govee is already percent).
 
 Light actions run on a single background worker thread, in arrival order, so a slow
 or unreachable light never blocks `/health`, `/metrics` or the next webhook; a failed
-action is logged and does not stop later ones. Tests: `pip install --require-hashes --only-binary :all: -r requirements-dev.lock && pytest`.
+action is logged and does not stop later ones. A burst of play and stop events cannot
+build a backlog: when a newer action for a room is queued before the older one starts,
+the older one is dropped and only the latest state is applied (its brightness is the one
+resolved when it was queued). A room's queued automations coalesce the same way. Different
+rooms never coalesce. The queue holds at most `DISPATCH_QUEUE_LIMIT` actions (default 32);
+on overflow the oldest queued action is dropped, logged once as
+`reason=dispatch_queue_overflow` and counted. Every dropped action is counted in
+`plex_dispatcher_actions_dropped_total{room,reason}` (`superseded` or `queue_overflow`). Tests: `pip install --require-hashes --only-binary :all: -r requirements-dev.lock && pytest`.
 
 Light control (`app/lights.py`) now has real per-brand controllers:
 
@@ -380,7 +387,7 @@ keys for your devices.
 
 Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`,
-`plex_dispatcher_light_decisions_total`)
+`plex_dispatcher_light_decisions_total`, `plex_dispatcher_actions_dropped_total`)
 and shown on the same Grafana dashboard. `plex_dispatcher_actions_total` counts
 dispatcher calls that completed; it is **not** a verified per-device success counter
 (a call where every light was skipped or failed still counts). Per-light results are in
@@ -396,6 +403,7 @@ use fixed `reason` and `operation` fields:
 - `cloud_control_failed`: the selected brand's cloud request failed.
 - `unexpected_controller_error`: a public controller caught an unexpected failure.
 - `dispatcher_action_failed`: a queued action failed; later actions continue.
+- `dispatch_queue_overflow`: the action queue was full; the oldest queued action was dropped.
 - `control_unavailable`: both transports were unavailable or failed.
 - `controller_unavailable`: no controller supports the configured brand.
 
