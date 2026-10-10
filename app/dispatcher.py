@@ -1,7 +1,9 @@
 import copy
 import logging
-from collections import Counter as OutcomeCounter
-from concurrent.futures import ThreadPoolExecutor
+import os
+import threading
+from collections import Counter as OutcomeCounter, deque
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Callable
 
@@ -32,13 +34,91 @@ LIGHT_DECISIONS_TOTAL = Counter(
     ["room", "decision"],
 )
 
+DISPATCH_DROPPED_TOTAL = Counter(
+    "plex_dispatcher_actions_dropped_total",
+    "Queued light actions dropped before they started",
+    ["room", "reason"],
+)
+
 # A light further than this many percentage points from the dim level was changed by hand.
 MANUAL_CHANGE_TOLERANCE_PERCENT = 5
 
+
+
+def _env_int(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+class ActionQueue:
+    """One worker that applies queued actions in order, coalescing them by key.
+
+    Submitting with a key drops any not-yet-started entry with the same key, and the
+    new entry goes to the back, so the latest state for a room wins and still runs after
+    every earlier action for that room. When the queue holds ``limit`` entries the oldest
+    queued one is dropped. A dropped entry's Future is cancelled and its ``on_drop``
+    callback is called with ``"superseded"`` or ``"queue_overflow"`` on the submitting
+    thread, outside the lock.
+    """
+
+    def __init__(self, limit, name="light-action"):
+        self.limit = limit
+        self._name = name
+        self._entries = deque()
+        self._ready = threading.Condition()
+        self._worker = None
+
+    def submit(self, fn, *args, key=None, on_drop=None, **kwargs):
+        future = Future()
+        dropped = []
+        with self._ready:
+            if key is not None:
+                for entry in [entry for entry in self._entries if entry[0] == key]:
+                    self._entries.remove(entry)
+                    dropped.append((entry, "superseded"))
+            while len(self._entries) >= self.limit:
+                dropped.append((self._entries.popleft(), "queue_overflow"))
+            self._entries.append((key, future, fn, args, kwargs, on_drop))
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._worker.start()
+            self._ready.notify()
+        for (_, dropped_future, _, _, _, callback), reason in dropped:
+            dropped_future.cancel()
+            if callback is not None:
+                try:
+                    callback(reason)
+                except Exception:
+                    logger.error("reason=dispatcher_action_failed operation=drop")
+        return future
+
+    def pending(self):
+        with self._ready:
+            return len(self._entries)
+
+    def _run(self):
+        while True:
+            with self._ready:
+                while not self._entries:
+                    self._ready.wait()
+                _, future, fn, args, kwargs, _ = self._entries.popleft()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:
+                future.set_exception(exc)
+
+
 # One worker applies every light action in the order it was queued, so a restore
 # can never overtake an earlier dim for the same room, and a slow or unreachable
-# light only delays later actions, never the event loop.
-_action_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="light-action")
+# light only delays later actions, never the event loop. A room's queued action is
+# replaced by a newer one for the same room, and the queue is bounded.
+ACTION_QUEUE_LIMIT = _env_int("DISPATCH_QUEUE_LIMIT", 32)
+_action_executor = ActionQueue(ACTION_QUEUE_LIMIT)
 
 # room_key -> set of client identifiers currently playing in that room
 _active_clients: dict[str, set] = {}
@@ -128,7 +208,9 @@ def _dispatch_lifecycle(room_key, action, context):
     snapshots = {room: (copy.deepcopy(registry.lights_for(room)), dict(registry.settings_for(room)))
                  for room in registry.rooms}
     blocked = {room for room in snapshots if _active_clients.get(room)}
-    _action_executor.submit(_run_automations, room_key, action, entries, snapshots, blocked, context)
+    # Nothing is audited for automations until they run, so a dropped batch leaves no queued record.
+    _action_executor.submit(_run_automations, room_key, action, entries, snapshots, blocked, context,
+                            key=("automations", room_key), on_drop=lambda reason: _dropped(room_key, reason))
 
 
 def _run_automations(source, event, entries, snapshots, blocked, context):
@@ -168,17 +250,31 @@ def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = N
     Targets are resolved now so a config reload after enqueue cannot change a queued action.
     """
     action_id = audit.correlation_id()
+
+    def on_drop(reason):
+        # The terminal record for a queued action that never ran; no light was touched.
+        _dropped(room_key, reason)
+        _record(audit_context, "light.action_summary", "skipped", reason, room_key, action, action_id, counts={})
+
     try:
         room_lights = copy.deepcopy(registry.lights_for(room_key))
         settings = dict(registry.settings_for(room_key))
     except Exception:
         # Reported by the worker through the same failure path as any other action error.
-        return _action_executor.submit(_apply, room_key, action, None, audit_context, action_id)
+        return _action_executor.submit(_apply, room_key, action, None, audit_context, action_id,
+                                       key=("room", room_key), on_drop=on_drop)
     level = settings["dim"] if action == "dim" else None  # a restore level is read per light at execution time
     _record(audit_context, "light.action_queued", "queued", "accepted", room_key, action, action_id,
             targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
                       "brightness": level} for light in room_lights])
-    return _action_executor.submit(_apply, room_key, action, room_lights, audit_context, action_id, settings)
+    return _action_executor.submit(_apply, room_key, action, room_lights, audit_context, action_id, settings,
+                                   key=("room", room_key), on_drop=on_drop)
+
+
+def _dropped(room_key, reason):
+    DISPATCH_DROPPED_TOTAL.labels(room=room_key, reason=reason).inc()
+    if reason == "queue_overflow":
+        logger.warning("reason=dispatch_queue_overflow limit=%d", ACTION_QUEUE_LIMIT)
 
 
 def _text(value):

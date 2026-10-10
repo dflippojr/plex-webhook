@@ -182,11 +182,9 @@ def test_tuya_exceptions_carry_no_text(real_lights, monkeypatch):
 
 def test_sequence_links_receipt_queue_results_and_summary(client, real_lights, lan, monkeypatch):
     monkeypatch.setattr(lights, "_secrets_cache", {"AA:BB": {"ip": "192.0.2.5"}})
-    assert post(client, payload("media.play", uuid="uuid-living")).status_code == 200
-    assert post(client, payload("media.pause", uuid="uuid-living")).status_code == 200
-    assert post(client, payload("media.play", uuid="uuid-living")).status_code == 200
-    assert post(client, payload("media.stop", uuid="uuid-living")).status_code == 200
-    drain()
+    for event in ("media.play", "media.pause", "media.play", "media.stop"):
+        assert post(client, payload(event, uuid="uuid-living")).status_code == 200
+        drain()  # each action runs before the next edge, so none is superseded
     log = rows(client)
     receipts = [r for r in log if r["action"] == "webhook.receipt"]
     assert len(receipts) == 4
