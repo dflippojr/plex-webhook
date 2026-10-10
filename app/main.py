@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import audit, auth, dispatcher
-from app.db import event_counts, get_connection, insert_event, last_received_at, list_known_clients
+from app.db import get_connection, insert_event, labeled_event_counts, last_received_at, list_known_clients
 from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
 # How often stale plays are checked; see dispatcher.expire_idle_clients.
@@ -59,6 +59,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("plex-webhook")
 
 db_conn = get_connection()
+
+# Event names Plex documents for webhooks. Payloads are unauthenticated, so every
+# events_total label comes from a fixed or configured set; anything else is "other".
+PLEX_EVENTS = frozenset({
+    "media.play", "media.pause", "media.resume", "media.stop", "media.scrobble", "media.rate",
+    "library.on.deck", "library.new", "admin.database.backup", "admin.database.corrupted",
+    "device.new", "playback.started",
+})
+
+
+def _event_labels(event, player, account):
+    """(event, player, account) label values; inputs use "unknown" for a missing value.
+
+    Players map to the configured client title; accounts are "known" when a title was sent.
+    """
+    return (
+        event if event == "unknown" or event in PLEX_EVENTS else "other",
+        player if player == "unknown" else registry.player_label(player),
+        "other" if account == "unknown" else "known",
+    )
+
 
 EVENTS_TOTAL = Counter(
     "plex_webhook_events_total",
@@ -167,8 +188,8 @@ if _last:
     LAST_EVENT_TIMESTAMP.set(datetime.fromisoformat(_last).timestamp())
 
 # Same for event counters, so a restart doesn't look like history was wiped
-for _event, _player, _account, _count in event_counts(db_conn):
-    EVENTS_TOTAL.labels(event=_event, player=_player, account=_account).inc(_count)
+for _labels, _count in labeled_event_counts(db_conn, _event_labels).items():
+    EVENTS_TOTAL.labels(*_labels).inc(_count)
 
 
 @app.get("/health")
@@ -308,7 +329,7 @@ async def plex_webhook(request: Request):
 
     account_title = ((payload or {}).get("Account") or {}).get("title") or "unknown"
     player_title = ((payload or {}).get("Player") or {}).get("title") or "unknown"
-    EVENTS_TOTAL.labels(event=event_type or "unknown", player=player_title, account=account_title).inc()
+    EVENTS_TOTAL.labels(*_event_labels(event_type or "unknown", player_title, account_title)).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
 
     if reason == "accepted":

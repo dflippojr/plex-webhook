@@ -41,7 +41,7 @@ def test_migration_reopen_checksums_and_legacy_preserved(audit_db):
         assert db.event_counts(conn) == [("media.play", "unknown", "unknown", 1)]
         assert conn.execute("SELECT raw_payload FROM events").fetchone()[0] == '"SECRET"'
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(events)")}
-        assert {"idx_events_counts_cover", "idx_events_clients_cover"} <= indexes
+        assert {"idx_events_labels_cover", "idx_events_clients_cover"} <= indexes
 
 
 @pytest.mark.parametrize("fields", [
