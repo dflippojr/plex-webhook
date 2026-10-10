@@ -16,7 +16,7 @@ from pathlib import Path
 
 from app import db
 
-INDEX_NAMES = ("idx_events_counts_cover", "idx_events_clients_cover")
+INDEX_NAMES = ("idx_events_labels_cover", "idx_events_clients_cover")
 QUERIES = {"event_counts": db.event_counts, "list_known_clients": db.list_known_clients}
 
 

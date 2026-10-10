@@ -37,11 +37,10 @@ CREATE TABLE IF NOT EXISTS automation_room_owners (
 );
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
-CREATE INDEX IF NOT EXISTS idx_events_counts_cover ON events(
-    COALESCE(NULLIF(event, ''), 'unknown'),
-    COALESCE(NULLIF(player_title, ''), 'unknown'),
-    COALESCE(NULLIF(account_title, ''), 'unknown')
-);
+-- Replaced by idx_events_labels_cover: plain columns let the counter re-seed read
+-- only the index, where the old expression index still looked up every row.
+DROP INDEX IF EXISTS idx_events_counts_cover;
+CREATE INDEX IF NOT EXISTS idx_events_labels_cover ON events(event, player_title, account_title);
 CREATE INDEX IF NOT EXISTS idx_events_clients_cover
     ON events(player_title, player_uuid, received_at)
     WHERE player_title IS NOT NULL;
@@ -95,18 +94,23 @@ def last_received_at(conn):
     return row[0] if row else None
 
 
+def labeled_event_counts(conn, label):
+    """Event totals keyed by label(event, player, account), with missing values as 'unknown'.
+
+    Rows stream from the covering index and are folded as they arrive, so memory
+    is bounded by the label space, not by the number of distinct stored values.
+    """
+    totals = {}
+    rows = conn.execute("SELECT event, player_title, account_title, COUNT(*) FROM events GROUP BY 1, 2, 3")
+    for *values, count in rows:
+        key = label(*("unknown" if value in (None, "") else value for value in values))
+        totals[key] = totals.get(key, 0) + count
+    return totals
+
+
 def event_counts(conn):
-    """Event totals per (event, player, account), labeled the way /webhook labels them."""
-    return conn.execute(
-        """
-        SELECT COALESCE(NULLIF(event, ''), 'unknown'),
-               COALESCE(NULLIF(player_title, ''), 'unknown'),
-               COALESCE(NULLIF(account_title, ''), 'unknown'),
-               COUNT(*)
-        FROM events
-        GROUP BY 1, 2, 3
-        """
-    ).fetchall()
+    """Event totals per (event, player, account), labeled the way /webhook reads the payload."""
+    return [(*key, count) for key, count in labeled_event_counts(conn, lambda *values: values).items()]
 
 
 def list_known_clients(conn):

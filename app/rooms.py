@@ -276,6 +276,12 @@ class RoomRegistry:
             return title_index.get(title.strip().lower())
         return None
 
+    def player_label(self, title) -> str:
+        """The configured client title this player title matches (case-insensitive, like room matching), else 'other'."""
+        rooms, _, title_index, _, _ = self._state
+        room = title_index.get(title.strip().lower()) if isinstance(title, str) else None
+        return rooms[room]["plex_clients"][0]["title"].strip() if room else "other"
+
     def playback_idle_seconds(self) -> int:
         return self._state[4]["playback_idle_minutes"] * 60
 

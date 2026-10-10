@@ -102,3 +102,43 @@ def test_100k_queries_use_indexes_without_group_sort(tmp_path):
         assert len(db.list_known_clients(conn)) == 12
     finally:
         conn.close()
+
+
+def test_labeled_counts_fold_many_distinct_values_on_the_covering_index(tmp_path):
+    conn = sqlite3.connect(tmp_path / "distinct.db")
+    try:
+        conn.executescript(db.SCHEMA)
+        conn.executemany(
+            "INSERT INTO events (received_at,event,player_title,account_title,raw_payload) VALUES (?,?,?,?,?)",
+            (("2026-10-01", f"evt.{i}", f"Player {i}", f"user{i}" if i % 2 else None, "{}") for i in range(20000)),
+        )
+        conn.commit()
+
+        def label(event, player, account):
+            return ("other", "other", "other" if account == "unknown" else "known")
+
+        assert db.labeled_event_counts(conn, label) == {("other", "other", "known"): 10000,
+                                                        ("other", "other", "other"): 10000}
+        plan = query_plan(conn, lambda c: db.labeled_event_counts(c, label))
+        assert any("COVERING INDEX idx_events_labels_cover" in step for step in plan), plan
+        assert not any("TEMP B-TREE" in step for step in plan), plan
+    finally:
+        conn.close()
+
+
+def test_expression_index_from_earlier_releases_is_replaced(tmp_path, monkeypatch):
+    path = tmp_path / "expression-index.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    conn = sqlite3.connect(path)
+    conn.executescript(db.SCHEMA)
+    conn.execute("CREATE INDEX idx_events_counts_cover ON events("
+                 "COALESCE(NULLIF(event, ''), 'unknown'), COALESCE(NULLIF(player_title, ''), 'unknown'), "
+                 "COALESCE(NULLIF(account_title, ''), 'unknown'))")
+    conn.close()
+    conn = db.get_connection()
+    try:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(events)")}
+        assert "idx_events_counts_cover" not in indexes
+        assert "idx_events_labels_cover" in indexes
+    finally:
+        conn.close()

@@ -95,8 +95,8 @@ unauthenticated until a Plex-compatible mechanism is chosen. Denied requests
 are counted in `plex_webhook_admin_denials_total{reason}` and audited with
 fixed reason codes (`missing_credential`, `invalid_credential`,
 `auth_unconfigured`), capped at 20 audit rows per minute; no attempted token,
-header, IP or body is stored. `/metrics` labels (`player`, `account`) still
-include Plex-supplied names. Rotation: change `ADMIN_API_TOKEN` in `.env` and
+header, IP or body is stored. `/metrics` labels carry only fixed or
+configured values (see Phase 2 below), never Plex-supplied names. Rotation: change `ADMIN_API_TOKEN` in `.env` and
 redeploy; there is no live rotation.
 
 Both room operations read the same file (`ROOMS_CONFIG_PATH`, default
@@ -181,13 +181,32 @@ table) and exposed as Prometheus metrics (`plex_webhook_events_total`,
 `observability-stack` Prometheus and shown on the "Plex Webhook" Grafana
 dashboard in the "Basement PC" folder.
 
-On first open, existing databases automatically gain two indexes for normalized
-counter seeding and client discovery. Index creation adds startup work once;
-subsequent opens reuse them, and all existing event history is retained. These
-queries still scale with history. On a synthetic 100,000-event Windows fixture,
-the indexes added 7,442,432 bytes (5.21%) and first open took about 476 ms.
-Maintaining them also adds write work: the measured individually committed insert
-median rose from 4.229 to 4.344 ms, with disk/cache variance affecting timings.
+`plex_webhook_events_total` labels are bounded because webhook payloads are
+unauthenticated:
+
+- `event`: one of the event names Plex documents for webhooks (`media.play`,
+  `media.pause`, `media.resume`, `media.stop`, `media.scrobble`, `media.rate`,
+  `library.on.deck`, `library.new`, `admin.database.backup`,
+  `admin.database.corrupted`, `device.new`, `playback.started`), else `other`;
+  `unknown` when the payload has none.
+- `player`: the `title` of the matching `plex_clients` entry in `rooms.yaml`
+  (case-insensitive, as configured), else `other`; `unknown` when absent. A
+  rename in `rooms.yaml` takes effect for new events on reload and for history
+  on the next restart.
+- `account`: `known` when Plex sent an account title, else `other`. Account names
+  are not exported.
+
+On startup the counters are re-seeded from SQLite with the same mapping, so the
+series count stays bounded however many distinct values are stored.
+
+On first open, existing databases automatically gain two indexes for counter
+seeding and client discovery (and drop the expression index earlier releases used
+for seeding). Index creation adds startup work once; subsequent opens reuse them,
+and all existing event history is retained. These queries still scale with
+history, but the counter re-seed reads only the covering index and holds one
+entry per label set. On a synthetic 100,000-event Windows fixture, the indexes
+added 7,442,432 bytes (5.21%) and first open took about 295 ms. Maintaining them
+also adds write work to each insert, within disk/cache variance on that fixture.
 
 Reproduce read medians (one warmup, seven trials), query plans, database sizes,
 first/second-open costs and 300 per-event commit samples with:

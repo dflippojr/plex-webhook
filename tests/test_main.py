@@ -52,12 +52,46 @@ def test_webhook_with_attachment_is_logged(client):
     assert record["attachments"] == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
 
 
+def _event_series():
+    return {tuple(sample.labels[name] for name in ("event", "player", "account"))
+            for metric in REGISTRY.collect() if metric.name == "plex_webhook_events"
+            for sample in metric.samples if sample.name == "plex_webhook_events_total"}
+
+
 def test_webhook_increments_metrics(client):
-    labels = {"event": "media.pause", "player": "Metrics TV", "account": "dan"}
+    labels = {"event": "media.pause", "player": "Living Room TV", "account": "known"}
     before = REGISTRY.get_sample_value("plex_webhook_events_total", labels) or 0
-    post(client, payload("media.pause", title="Metrics TV"))
+    post(client, payload("media.pause", title="living room tv "))
     assert REGISTRY.get_sample_value("plex_webhook_events_total", labels) == before + 1
     assert b"plex_webhook_events_total" in client.get("/metrics").content
+
+
+def test_event_labels_map_unknown_values_to_other(registry):
+    import app.main as main
+
+    assert main._event_labels("media.play", " BEDROOM apple tv", "dan") == ("media.play", "Bedroom Apple TV", "known")
+    assert main._event_labels("media.bogus", "Stranger TV", "unknown") == ("other", "other", "other")
+    assert main._event_labels("unknown", "unknown", "unknown") == ("unknown", "unknown", "other")
+    labels = {main._event_labels(f"evt.{i}", f"Player {i}", f"user{i}") for i in range(1000)}
+    assert labels == {("other", "other", "known")}
+
+
+def test_webhook_labels_stay_bounded_for_many_distinct_values(client):
+    import app.main as main
+
+    for i in range(40):
+        body = payload(f"synthetic.{i}", title=f"Synthetic Player {i}", account=f"synthetic-user-{i}")
+        assert post(client, body).status_code == 200
+    post(client, payload("media.stop"))
+    client.post("/webhook", data={"payload": "{not json"})
+    series = _event_series()
+    assert not any("synthetic" in value.lower() for labels in series for value in labels)
+    event_values = main.PLEX_EVENTS | {"other", "unknown"}
+    assert {labels[0] for labels in series} <= event_values
+    assert {labels[1] for labels in series} <= {"Living Room TV", "Bedroom Apple TV", "other", "unknown"}
+    assert {labels[2] for labels in series} <= {"known", "other"}
+    assert ("other", "other", "known") in series
+    assert ("unknown", "unknown", "other") in series
 
 
 def test_clients_lists_seen_players(client):
@@ -169,7 +203,7 @@ def test_invalid_startup_still_captures_webhook(client, rooms_file, monkeypatch,
     assert light_calls == []
 
 
-def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypatch):
+def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypatch, registry):
     import app.db
     import app.main as main
 
@@ -177,7 +211,14 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
     conn = sqlite3.connect(db_path)
     conn.executescript(app.db.SCHEMA)
     for event in ("media.play", "media.play", "media.stop"):
-        app.db.insert_event(conn, "2024-05-01T12:00:00+00:00", event, payload(event, "Seed TV"), "{}")
+        app.db.insert_event(conn, "2024-05-01T12:00:00+00:00", event, payload(event, "Living Room TV"), "{}")
+    app.db.insert_event(conn, "2024-05-01T11:00:00+00:00", "media.play", payload("media.play", "Seed TV"), "{}")
+    # Many distinct synthetic values collapse into a handful of series.
+    conn.executemany(
+        "INSERT INTO events (received_at, event, player_title, account_title, raw_payload) VALUES (?,?,?,?,?)",
+        (("2024-04-01T00:00:00+00:00", f"synthetic.{i}", f"Synthetic {i}", f"user{i}", "{}") for i in range(5000)),
+    )
+    conn.commit()
     conn.close()
 
     # Re-import the app module against the seeded database, dropping the old collectors first.
@@ -186,9 +227,14 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
     monkeypatch.setattr(app.db, "DB_PATH", db_path)
     try:
         reloaded = importlib.reload(main)
-        labels = {"player": "Seed TV", "account": "dan"}
+        labels = {"player": "Living Room TV", "account": "known"}
         assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.play", **labels}) == 2
         assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.stop", **labels}) == 1
+        other_player = {"event": "media.play", "player": "other", "account": "known"}
+        assert REGISTRY.get_sample_value("plex_webhook_events_total", other_player) == 1
+        other_all = {"event": "other", "player": "other", "account": "known"}
+        assert REGISTRY.get_sample_value("plex_webhook_events_total", other_all) == 5000
+        assert len(_event_series()) == 4
         assert REGISTRY.get_sample_value("plex_webhook_last_event_timestamp_seconds") == 1714564800.0
         reloaded.db_conn.close()
     finally:
