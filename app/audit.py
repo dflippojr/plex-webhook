@@ -40,7 +40,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, id);
 # Actor kinds are fixed: webhook senders are the unverified ``plex-server``
 # client, denied callers stay anonymous, and a valid admin token is the verified
 # ``owner-admin`` client identity (see app.auth); never a request-supplied name.
-ACTOR_IDS = {"plex_server": "plex-server", "admin_token": "owner-admin"}
+# ``playback_expiry`` is the service restoring a room whose play went stale.
+ACTOR_IDS = {"plex_server": "plex-server", "admin_token": "owner-admin", "playback_expiry": "playback-expiry"}
 ACTOR_VERIFIED = {"admin_token": 1}
 LIGHT_FAILURE_REASONS = {
     "unsupported_brand", "missing_credentials", "missing_model", "no_address", "library_unavailable",
@@ -59,7 +60,7 @@ LIGHT_DECISIONS = {
 }
 OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
-        "received": {"accepted"},
+        "received": {"accepted", "server_not_allowed"},
         "rejected": {"missing_payload", "invalid_json", "invalid_payload", "invalid_form"},
     }),
     "rooms.reload": ("http", "anonymous", "rooms", {

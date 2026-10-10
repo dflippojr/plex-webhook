@@ -72,13 +72,13 @@ def rooms_file(tmp_path):
 @pytest.fixture
 def registry(rooms_file):
     """The module-level registry, pointed at the test rooms file."""
-    from app.rooms import registry as reg
+    from app.rooms import EMPTY_STATE, registry as reg
 
     reg.config_path = rooms_file
     reg.reload()
     yield reg
     reg.config_path = Path(os.environ["ROOMS_CONFIG_PATH"])
-    reg._state = ({}, {}, {}, [])
+    reg._state = EMPTY_STATE
 
 
 @pytest.fixture

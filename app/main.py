@@ -1,7 +1,9 @@
+import asyncio
 import json
 import os
 import logging
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +18,18 @@ from app import audit, auth, dispatcher
 from app.db import event_counts, get_connection, insert_event, last_received_at, list_known_clients
 from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
-app = FastAPI(title="plex-webhook")
+# How often stale plays are checked; see dispatcher.expire_idle_clients.
+EXPIRY_SWEEP_SECONDS = 30
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    sweeper = asyncio.create_task(_expire_idle_players())
+    yield
+    sweeper.cancel()
+
+
+app = FastAPI(title="plex-webhook", lifespan=lifespan)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 EVENT_LOG = DATA_DIR / "events.jsonl"
@@ -65,6 +78,9 @@ if "WEBHOOK_REJECTED_TOTAL" not in globals():
                                      "Webhook requests rejected before storage", ["reason"])
 for _reason in ("body_too_large", "too_many_fields", "too_many_files", "field_too_large"):
     WEBHOOK_REJECTED_TOTAL.labels(reason=_reason)
+if "UNLISTED_SERVER_EVENTS_TOTAL" not in globals():
+    UNLISTED_SERVER_EVENTS_TOTAL = Counter("plex_webhook_unlisted_server_events_total",
+                                           "Webhook events stored but not dispatched: Server.uuid not allowed")
 if "ADMIN_DENIALS_TOTAL" not in globals():
     ADMIN_DENIALS_TOTAL = Counter("plex_webhook_admin_denials_total", "Denied admin requests", ["reason"])
 for _reason in auth.DENIAL_REASONS:
@@ -111,7 +127,7 @@ def _record_audit(**fields):
         AUDIT_FAILURES_TOTAL.inc()
 
 
-def _light_audit_context(correlation, event_id):
+def _light_audit_context(correlation, event_id, actor="plex_server"):
     """Bind the receipt to the worker. The path is resolved here; the worker opens its own connection."""
     try:
         path = db_conn.execute("PRAGMA database_list").fetchone()[2]
@@ -127,7 +143,17 @@ def _light_audit_context(correlation, event_id):
             logger.warning("reason=audit_write_failed")
             AUDIT_FAILURES_TOTAL.inc()
 
-    return dispatcher.AuditContext(record, correlation, event_id)
+    return dispatcher.AuditContext(record, correlation, event_id, actor)
+
+
+async def _expire_idle_players():
+    while True:
+        await asyncio.sleep(EXPIRY_SWEEP_SECONDS)
+        try:
+            dispatcher.expire_idle_clients(
+                lambda: _light_audit_context(audit.correlation_id(), None, "playback_expiry"))
+        except Exception:
+            logger.error("reason=dispatcher_action_failed operation=expire")
 
 
 _record_audit(action="service.config_load", outcome=registry.load_outcome,
@@ -195,7 +221,7 @@ def _room_config_operation(operation, action, correlation):
 async def validate_rooms(request: Request):
     _require_admin(request, "rooms.validate")
     correlation = audit.correlation_id()
-    candidate, _, _, _ = _room_config_operation(registry.validate, "rooms.validate", correlation)
+    candidate, *_ = _room_config_operation(registry.validate, "rooms.validate", correlation)
     _record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation=correlation, admin=True)
     return {"status": "valid", "rooms": list(candidate)}
 
@@ -244,6 +270,11 @@ async def plex_webhook(request: Request):
             logger.warning("payload field present but not valid JSON")
     if reason != "accepted":
         payload = None
+    elif not registry.server_allowed(payload):
+        # Stored and counted like any event, but never dispatched.
+        reason = "server_not_allowed"
+        UNLISTED_SERVER_EVENTS_TOTAL.inc()
+        logger.warning("reason=server_not_allowed")
 
     attachments = [
         {"field": key, "filename": getattr(value, "filename", None), "content_type": getattr(value, "content_type", None)}
@@ -271,7 +302,8 @@ async def plex_webhook(request: Request):
         f.write(json.dumps(record) + "\n")
 
     event_id = insert_event(db_conn, received_at, event_type, payload, raw_json, truncated)
-    _record_audit(action="webhook.receipt", outcome="received" if reason == "accepted" else "rejected",
+    _record_audit(action="webhook.receipt",
+                  outcome="received" if reason in ("accepted", "server_not_allowed") else "rejected",
                   reason_code=reason, correlation=correlation, event_id=event_id)
 
     account_title = ((payload or {}).get("Account") or {}).get("title") or "unknown"
@@ -279,7 +311,8 @@ async def plex_webhook(request: Request):
     EVENTS_TOTAL.labels(event=event_type or "unknown", player=player_title, account=account_title).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
 
-    dispatcher.handle_event(payload, _light_audit_context(correlation, event_id) if payload else None)
+    if reason == "accepted":
+        dispatcher.handle_event(payload, _light_audit_context(correlation, event_id))
 
     logger.info("captured event=%s", event_type)
     return {"status": "received", "event": event_type}
