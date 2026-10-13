@@ -48,6 +48,14 @@ DISPATCH_DROPPED_TOTAL = Counter(
     ["room", "reason"],
 )
 
+LIGHT_RESULTS_TOTAL = Counter(
+    "plex_dispatcher_light_results_total",
+    "Per-light results by transport and outcome: transport evidence, never observed bulb state",
+    ["room", "brand", "transport", "outcome"],
+)
+METRIC_BRANDS = {"govee", "tuya"}
+LIGHT_OUTCOMES = set(audit.OPERATIONS["light.result"][3])
+
 # A light further than this many percentage points from the dim level was changed by hand.
 MANUAL_CHANGE_TOLERANCE_PERCENT = 5
 
@@ -427,8 +435,19 @@ def _summarize(results):
     return "completed_unverified", "all_sent"
 
 
+def _count_result(room_key, result):
+    """Fixed label values only: configured unknown brands become ``other``."""
+    LIGHT_RESULTS_TOTAL.labels(
+        room=room_key,
+        brand=result.brand if result.brand in METRIC_BRANDS else "other",
+        transport=result.transport if result.transport in audit.LIGHT_TRANSPORTS else "none",
+        outcome=result.outcome if result.outcome in LIGHT_OUTCOMES else "unconfirmed",
+    ).inc()
+
+
 def _report(context, room_key, action, action_id, results):
     for result in results or ():
+        _count_result(room_key, result)
         _record(context, "light.result", result.outcome, result.reason, result.target_id, action, action_id,
                 brand=_text(result.brand), transport=result.transport,
                 credential_source=result.credential_source, progress=result.progress,

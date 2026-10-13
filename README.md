@@ -459,11 +459,25 @@ keys for your devices.
 
 Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`,
-`plex_dispatcher_light_decisions_total`, `plex_dispatcher_actions_dropped_total`)
-and shown on the same Grafana dashboard. `plex_dispatcher_actions_total` counts
-dispatcher calls that completed; it is **not** a verified per-device success counter
-(a call where every light was skipped or failed still counts). Per-light results are in
-the [audit trail](docs/audit.md#light-actions).
+`plex_dispatcher_light_decisions_total`, `plex_dispatcher_actions_dropped_total`,
+`plex_dispatcher_light_results_total`) and shown on the same Grafana dashboard.
+`plex_dispatcher_actions_total` counts dispatcher calls that completed; it is **not** a
+verified per-device success counter (a call where every light was skipped or failed still
+counts). Per-light results are in the [audit trail](docs/audit.md#light-actions) and are
+counted in `plex_dispatcher_light_results_total{room,brand,transport,outcome}`, once per
+`light.result` the trail records, even when the audit write fails:
+
+- `brand`: `govee`, `tuya` or `other` (any other configured brand).
+- `transport`: `lan`, `local`, `cloud` or `none`. A light the dispatcher chose not to touch
+  (`no_record`, `light_off`, `manual_change`) counts as `transport="none", outcome="skipped"`.
+- `outcome`: `command_sent`, `request_accepted_by_transport`, `unconfirmed`, `failed` or
+  `skipped`. Outcomes are transport evidence, **never observed bulb state**:
+  `command_sent` means Govee LAN UDP datagrams were sent with no acknowledgement, and
+  `request_accepted_by_transport` means cloud HTTP completed or the local/cloud Tuya reply
+  held no error.
+
+An action whose backend reported nothing counts no per-light results. Govee lights that
+fall back to the cloud show up as `transport="cloud"` where `lan` was expected.
 
 Application-owned failure logs in `app/lights.py` and `app/dispatcher.py`
 use fixed `reason` and `operation` fields:
