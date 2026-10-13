@@ -332,10 +332,10 @@ def test_govee_lan_reads_devstatus(monkeypatch, secrets):
     secrets["AA:BB"] = {"ip": "10.0.0.5"}
     monkeypatch.setattr(lights.socket, "socket", StatusSocket)
     StatusSocket.sent, StatusSocket.reply, StatusSocket.source = [], lan_reply(1, 64), "10.0.0.5"
-    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 64)
+    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 64, "lan")
     assert StatusSocket.sent == [({"msg": {"cmd": "devStatus", "data": {}}}, ("10.0.0.5", 4003))]
     StatusSocket.reply = lan_reply(0, 64)
-    assert lights.read_state(GOVEE) == lights.StateReading(True, False, 64)
+    assert lights.read_state(GOVEE) == lights.StateReading(True, False, 64, "lan")
 
 
 def test_govee_lan_ignores_other_senders_and_times_out(monkeypatch, secrets):
@@ -358,7 +358,7 @@ def test_govee_falls_back_to_cloud_state(monkeypatch, secrets):
 
     monkeypatch.setattr(requests, "get", get)
     monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
-    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 42)
+    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 42, "cloud")
     assert seen["params"] == {"device": "AA:BB", "model": "H6159"} and seen["timeout"] == lights.STATE_READ_TIMEOUT_S
 
 
@@ -400,20 +400,20 @@ def install(monkeypatch, **kwargs):
 def test_tuya_local_status_converts_the_scale(monkeypatch, secrets):
     secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.7"}
     fake = install(monkeypatch, local={"dps": {"1": True, "3": 500}})
-    assert lights.read_state(TUYA) == lights.StateReading(True, True, 50)
+    assert lights.read_state(TUYA) == lights.StateReading(True, True, 50, "local")
     assert fake.timeouts == [lights.STATE_READ_TIMEOUT_S]
 
 
 def test_tuya_local_honours_configured_data_points(monkeypatch, secrets):
     secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.7"}
     install(monkeypatch, local={"dps": {"20": True, "22": 1000, "1": False, "3": 10}})
-    assert lights.read_state({**TUYA, "switch_dp": 20, "brightness_dp": 22}) == lights.StateReading(True, True, 100)
+    assert lights.read_state({**TUYA, "switch_dp": 20, "brightness_dp": 22}) == lights.StateReading(True, True, 100, "local")
 
 
 def test_tuya_local_off_and_unreadable(monkeypatch, secrets):
     secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.7"}
     install(monkeypatch, local={"dps": {"1": False, "3": 500}})
-    assert lights.read_state(TUYA) == lights.StateReading(True, False, None)
+    assert lights.read_state(TUYA) == lights.StateReading(True, False, None, "local")
     install(monkeypatch, local={"Error": "Network Error", "Err": "901"})
     assert lights.read_state(TUYA) == lights.StateReading.failed()
     install(monkeypatch, local={"dps": {"1": True}})  # on, but no level to restore from
@@ -426,7 +426,7 @@ def test_tuya_falls_back_to_cloud_status(monkeypatch, secrets):
     monkeypatch.setenv("TUYA_ACCESS_KEY", "secret")
     cloud = {"success": True, "result": [{"code": "switch_1", "value": True}, {"code": "bright_value_v2", "value": 10}]}
     install(monkeypatch, local=OSError("unreachable"), cloud=cloud)
-    assert lights.read_state(TUYA) == lights.StateReading(True, True, 1)
+    assert lights.read_state(TUYA) == lights.StateReading(True, True, 1, "cloud")
     install(monkeypatch, local=OSError("unreachable"), cloud={"success": False})
     assert lights.read_state(TUYA) == lights.StateReading.failed()
 

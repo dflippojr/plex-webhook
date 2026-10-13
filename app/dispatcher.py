@@ -69,7 +69,8 @@ class ActionQueue:
     every earlier action for that room. When the queue holds ``limit`` entries the oldest
     queued one is dropped. A dropped entry's Future is cancelled and its ``on_drop``
     callback is called with ``"superseded"`` or ``"queue_overflow"`` on the submitting
-    thread, outside the lock.
+    thread, outside the lock. With ``evict=False`` a full queue drops the new entry
+    instead, so optional work never pushes out a queued light action.
     """
 
     def __init__(self, limit, name="light-action"):
@@ -79,21 +80,25 @@ class ActionQueue:
         self._ready = threading.Condition()
         self._worker = None
 
-    def submit(self, fn, *args, key=None, on_drop=None, **kwargs):
+    def submit(self, fn, *args, key=None, on_drop=None, evict=True, **kwargs):
         future = Future()
         dropped = []
+        entry = (key, future, fn, args, kwargs, on_drop)
         with self._ready:
             if key is not None:
-                for entry in [entry for entry in self._entries if entry[0] == key]:
-                    self._entries.remove(entry)
-                    dropped.append((entry, "superseded"))
-            while len(self._entries) >= self.limit:
-                dropped.append((self._entries.popleft(), "queue_overflow"))
-            self._entries.append((key, future, fn, args, kwargs, on_drop))
-            if self._worker is None or not self._worker.is_alive():
-                self._worker = threading.Thread(target=self._run, name=self._name, daemon=True)
-                self._worker.start()
-            self._ready.notify()
+                for queued in [queued for queued in self._entries if queued[0] == key]:
+                    self._entries.remove(queued)
+                    dropped.append((queued, "superseded"))
+            if not evict and len(self._entries) >= self.limit:
+                dropped.append((entry, "queue_overflow"))
+            else:
+                while len(self._entries) >= self.limit:
+                    dropped.append((self._entries.popleft(), "queue_overflow"))
+                self._entries.append(entry)
+                if self._worker is None or not self._worker.is_alive():
+                    self._worker = threading.Thread(target=self._run, name=self._name, daemon=True)
+                    self._worker.start()
+                self._ready.notify()
         for (_, dropped_future, _, _, _, callback), reason in dropped:
             dropped_future.cancel()
             if callback is not None:
@@ -305,6 +310,57 @@ def _automation_action(source, target, action, snapshots, blocked, context):
             targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
                       "brightness": settings["dim"] if action == "dim" else None} for light in room_lights])
     _apply(target, action, room_lights, context, action_id, settings, automation_source=source)
+
+
+def check_lights(room_key: str) -> Future:
+    """Queue a read-only check of a room's lights behind any queued light action.
+
+    The reads share the worker because Govee LAN reads and discovery both bind UDP 4002,
+    so a concurrent dim could take their replies. The Future resolves to one entry per
+    configured light, or raises CheckDropped when the queue drops the check. A cancelled
+    Future (a caller that gave up) is skipped if it has not started yet.
+    """
+    room_lights = copy.deepcopy(registry.lights_for(room_key))
+    result = Future()
+
+    def run():
+        if result.set_running_or_notify_cancel():
+            try:
+                result.set_result(_check(room_key, room_lights))
+            except BaseException as exc:
+                result.set_exception(exc)
+
+    def on_drop(reason):
+        _dropped(room_key, reason)
+        if result.set_running_or_notify_cancel():
+            result.set_exception(CheckDropped(reason))
+
+    _action_executor.submit(run, key=("check", room_key), on_drop=on_drop, evict=False)
+    return result
+
+
+class CheckDropped(Exception):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _check(room_key, room_lights):
+    """Read each light and whether it holds a restore record. Changes no light, record or player state."""
+    lights.prepare(room_lights)
+    entries = []
+    for light in room_lights:
+        reading = lights.read_state(light)
+        ok = reading.ok is True
+        transport = reading.transport if ok and reading.transport in audit.LIGHT_TRANSPORTS else "none"
+        brightness = reading.brightness if ok and type(reading.brightness) is int else None
+        entries.append({
+            "id": light.get("id"), "brand": light.get("brand"), "name": light.get("name"),
+            "read": {"ok": ok, "on": reading.on if ok and type(reading.on) is bool else None,
+                     "brightness_percent": brightness, "transport": transport},
+            "restore_record": db.get_restore_record(room_key, _text(light.get("id"))) is not None,
+        })
+    return entries
 
 
 def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = None):

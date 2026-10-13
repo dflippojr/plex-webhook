@@ -72,6 +72,12 @@ OPERATIONS = {
         "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
     }),
     "rooms.read": ("http", "anonymous", "rooms", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
+    # A read-only light check; per-light values never enter the trail.
+    "lights.check": ("http", "anonymous", "room", {
+        "completed": {"read"}, "rejected": {"unknown_room"},
+        "failed": {"timed_out", "queue_overflow", "superseded", "check_error"},
+        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
+    }),
     "clients.read": ("http", "anonymous", "clients", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
     "service.config_load": ("service", "system", "rooms", {
         "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},

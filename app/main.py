@@ -20,6 +20,8 @@ from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
 # How often stale plays are checked; see dispatcher.expire_idle_clients.
 EXPIRY_SWEEP_SECONDS = 30
+# How long GET /rooms/{room}/lights waits for its queued reads.
+LIGHT_CHECK_TIMEOUT_S = 30
 
 
 @asynccontextmanager
@@ -213,6 +215,42 @@ async def clients(request: Request):
 async def rooms(request: Request):
     _require_admin(request, "rooms.read")
     return {"rooms": registry.rooms}
+
+
+@app.get("/rooms/{room}/lights")
+async def check_room_lights(room: str, request: Request):
+    """Read every configured light of a room on the light worker. Never changes a light."""
+    _require_admin(request, "lights.check")
+    correlation = audit.correlation_id()
+    if room not in registry.rooms:
+        # The key is request text, so it stays out of the trail.
+        _record_audit(action="lights.check", outcome="rejected", reason_code="unknown_room",
+                      correlation=correlation, admin=True)
+        raise HTTPException(status_code=404, detail="Unknown room")
+    try:
+        entries = await asyncio.wait_for(asyncio.wrap_future(dispatcher.check_lights(room)), LIGHT_CHECK_TIMEOUT_S)
+        outcome, reason = "completed", "read"
+    except asyncio.TimeoutError:
+        outcome, reason = "failed", "timed_out"
+    except dispatcher.CheckDropped as exc:
+        outcome, reason = "failed", exc.reason
+    except Exception:
+        logger.error("reason=light_check_failed")
+        outcome, reason = "failed", "check_error"
+    _record_audit(action="lights.check", outcome=outcome, reason_code=reason, correlation=correlation,
+                  admin=True, target_id=room)
+    if outcome != "completed":
+        status, detail = LIGHT_CHECK_FAILURES[reason]
+        raise HTTPException(status_code=status, detail=detail)
+    return {"room": room, "lights": entries}
+
+
+LIGHT_CHECK_FAILURES = {
+    "timed_out": (504, "Light check timed out"),
+    "queue_overflow": (503, "Light check queue full"),
+    "superseded": (503, "Light check superseded"),
+    "check_error": (500, "Light check failed"),
+}
 
 
 @app.post("/rooms/reload")
