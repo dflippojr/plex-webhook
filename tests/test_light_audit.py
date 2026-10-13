@@ -42,7 +42,7 @@ def lan(monkeypatch):
         state.sent.append(message["msg"]["cmd"])
 
     monkeypatch.setattr(lights.GoveeController, "_send_lan_command", send)
-    monkeypatch.setattr(lights.GoveeController, "_discover_ip", lambda self, device_id, timeout=None: None)
+    monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
     state.reading = lights.StateReading.failed()
     monkeypatch.setattr(lights.GoveeController, "_read_lan", lambda self, light, timeout: state.reading)
     return state
