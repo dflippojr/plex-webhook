@@ -37,7 +37,8 @@ transitive package with hashes. After editing the direct pins in
 **For Docker bridge networking, reserve each Govee bulb's address in DHCP and
 set its static `ip` in `config/devices.secrets.yaml`.** Multicast discovery may
 not reach bulbs across Docker networks, VLANs, or AP isolation. A configured
-static IP skips discovery. Start from
+static IP skips discovery. Discovered addresses are cached for 15 minutes, but
+a static `ip` is still the recommendation. Start from
 [`config/devices.secrets.yaml.example`](config/devices.secrets.yaml.example)
 and follow [the LAN Control setup](SETUP.md#2-enable-govee-lan-control-primary-per-device).
 

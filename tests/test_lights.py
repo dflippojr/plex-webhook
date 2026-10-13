@@ -251,6 +251,182 @@ def test_govee_unexpected_error_is_caught(monkeypatch, caplog):
     assert "unexpected_controller_error" in caplog.text
 
 
+# --- Govee discovery cache -------------------------------------------------------
+
+ROOM = [{"brand": "govee", "id": f"G{n}", "name": f"Bulb {n}", "model": "H6159"} for n in range(3)]
+
+
+class LanSocket:
+    """A fake Govee LAN: scans are answered by `bulbs`, devStatus by `status` (ip -> reply)."""
+
+    bulbs, status, scans, commands, clock = {}, {}, 0, [], None
+
+    def __init__(self, *args):
+        self.inbox = []
+
+    setsockopt = bind = settimeout = close = lambda self, *a: None
+
+    def sendto(self, data, addr):
+        message = json.loads(data.decode())["msg"]
+        if message["cmd"] == "scan":
+            LanSocket.scans += 1
+            self.inbox += [(scan_reply(device, ip), ip) for device, ip in LanSocket.bulbs.items()]
+        elif message["cmd"] == "devStatus":
+            if addr[0] in LanSocket.status:
+                self.inbox.append((json.dumps(LanSocket.status[addr[0]]).encode(), addr[0]))
+        else:
+            LanSocket.commands.append((message["cmd"], addr[0]))
+
+    def recvfrom(self, size):
+        if not self.inbox:
+            raise socket.timeout()
+        data, ip = self.inbox.pop(0)
+        return data, (ip, 4002)
+
+
+@pytest.fixture
+def lan(monkeypatch):
+    LanSocket.bulbs, LanSocket.status, LanSocket.scans, LanSocket.commands = {}, {}, 0, []
+    monkeypatch.setattr(lights.socket, "socket", LanSocket)
+    clock = types.SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(lights, "_clock", lambda: clock.now)
+    LanSocket.clock = clock
+    return LanSocket
+
+
+def on_at(level):
+    return {"msg": {"cmd": "devStatus", "data": {"onOff": 1, "brightness": level}}}
+
+
+def full_dim(room=ROOM):
+    """The dispatcher's dim sequence: prepare, read every light, then command them."""
+    lights.prepare(room)
+    readings = [lights.read_state(light) for light in room]
+    return readings, lights.apply_action("dim", room, 20)
+
+
+def test_unanswered_room_scans_once_per_dim_and_falls_back(lan):
+    readings, results = full_dim()
+    assert lan.scans == 1
+    assert readings == [lights.StateReading.failed()] * 3
+    assert [(r.outcome, r.reason) for r in results] == [("skipped", "missing_credentials")] * 3
+    assert [r.attempts[0].reason for r in results] == ["no_address"] * 3
+    assert lan.commands == []
+
+
+def test_unanswered_room_uses_cloud_when_configured(lan, monkeypatch):
+    monkeypatch.setenv("GOVEE_API_KEY", "key")
+    body = {"data": {"properties": [{"powerState": "on"}, {"brightness": 70}]}}
+    monkeypatch.setattr(requests, "get", lambda *a, **k: types.SimpleNamespace(
+        raise_for_status=lambda: None, json=lambda: body))
+    monkeypatch.setattr(requests, "put", lambda *a, **k: types.SimpleNamespace(raise_for_status=lambda: None))
+    readings, results = full_dim()
+    assert lan.scans == 1
+    assert readings == [lights.StateReading(True, True, 70)] * 3
+    assert [(r.transport, r.outcome) for r in results] == [("cloud", "request_accepted_by_transport")] * 3
+    assert [r.attempts[0].reason for r in results] == ["no_address"] * 3
+
+
+def test_missing_devices_are_scanned_for_again_after_a_minute(lan):
+    full_dim()
+    lan.clock.now += lights.GOVEE_DISCOVERY_MISS_TTL_S - 1
+    full_dim()
+    assert lan.scans == 1
+    lan.clock.now += 1
+    full_dim()
+    assert lan.scans == 2
+
+
+def test_answered_room_is_cached_for_the_ttl(lan):
+    lan.bulbs = {light["id"]: f"10.0.0.{n + 1}" for n, light in enumerate(ROOM)}
+    lan.status = {ip: on_at(60) for ip in lan.bulbs.values()}
+    readings, results = full_dim()
+    assert lan.scans == 1
+    assert readings == [lights.StateReading(True, True, 60)] * 3
+    assert [(r.transport, r.outcome, r.credential_source) for r in results] == [("lan", "command_sent", "none")] * 3
+    assert lan.commands[:2] == [("turn", "10.0.0.1"), ("brightness", "10.0.0.1")]
+
+    lan.clock.now += lights.GOVEE_DISCOVERY_TTL_S - 1
+    full_dim()
+    assert lan.scans == 1
+    lan.clock.now += 1
+    full_dim()
+    assert lan.scans == 2
+
+
+def test_failed_devstatus_at_a_cached_address_scans_again_next_action(lan):
+    lan.bulbs, lan.status = {"G0": "10.0.0.1"}, {"10.0.0.1": on_at(40)}
+    room = ROOM[:1]
+    full_dim(room)
+    assert lan.scans == 1
+    # The lease moved: no devStatus answer at the cached address drops the entry.
+    lan.status = {}
+    lights.prepare(room)
+    assert lan.scans == 1
+    assert lights.read_state(room[0]) == lights.StateReading.failed()
+    assert lights._govee_addresses == {}
+    lan.bulbs = {"G0": "10.0.0.7"}
+    lan.status = {"10.0.0.7": on_at(40)}
+    lights.prepare(room)
+    assert lan.scans == 2
+    assert lights.read_state(room[0]) == lights.StateReading(True, True, 40)
+
+
+def test_static_ip_never_scans(lan, secrets):
+    secrets.update({light["id"]: {"ip": f"192.168.1.{n + 1}"} for n, light in enumerate(ROOM)})
+    lan.status = {"192.168.1.1": on_at(50)}
+    readings, results = full_dim()
+    assert lan.scans == 0
+    assert readings[0] == lights.StateReading(True, True, 50)
+    assert [(r.outcome, r.credential_source) for r in results] == [("command_sent", "device_config")] * 3
+    assert lights._govee_addresses == {}  # a failed read at a static ip has nothing to drop
+
+
+def test_one_scan_resolves_only_the_lights_that_need_it(lan, secrets, monkeypatch):
+    secrets["G0"] = {"ip": "192.168.1.1"}
+    lan.bulbs = {"G1": "10.0.0.2"}
+    seen = []
+    original = lights.GoveeController._discover_ips
+
+    def discover(self, device_ids, timeout=lights.GOVEE_LAN_SCAN_TIMEOUT_S):
+        seen.append(list(device_ids))
+        return original(self, device_ids, timeout)
+
+    monkeypatch.setattr(lights.GoveeController, "_discover_ips", discover)
+    lights.prepare(ROOM + [TUYA, ROOM[1], {"brand": "govee"}, "not-a-light"])
+    assert seen == [["G1", "G2"]]
+    assert lights._govee_addresses["G1"][0] == "10.0.0.2"
+    assert lights._govee_addresses["G2"][0] is None
+
+
+def test_batch_scan_matches_each_reply_to_its_own_device(fake_socket):
+    fake_socket.replies = [scan_reply("G1", "10.0.0.9"), scan_reply("OTHER", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
+    assert lights.GoveeController()._discover_ips(["G0", "G1", "G2"]) == {"G0": "10.0.0.9", "G1": "10.0.0.9"}
+    assert sum(msg["msg"]["cmd"] == "scan" for s in fake_socket.instances for msg, _ in s.sent) == 1
+
+
+def test_batch_scan_stops_once_every_device_answered(fake_socket):
+    fake_socket.replies = [scan_reply("G0", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
+    assert lights.GoveeController()._discover_ips(["G0"]) == {"G0": "10.0.0.9"}
+    assert len(fake_socket.replies) == 1
+
+
+def test_direct_calls_share_the_cache_without_prepare(lan):
+    lan.bulbs = {"G0": "10.0.0.1"}
+    lan.status = {"10.0.0.1": on_at(30)}
+    assert lights.read_state(ROOM[0]) == lights.StateReading(True, True, 30)
+    lights.GoveeController().apply("dim", ROOM[0])
+    assert lan.scans == 1
+    assert lan.commands == [("turn", "10.0.0.1"), ("brightness", "10.0.0.1")]
+
+
+def test_prepare_never_raises(monkeypatch, caplog):
+    monkeypatch.setattr(lights.GoveeController, "prepare", lambda self, room_lights: 1 / 0)
+    with caplog.at_level(logging.INFO, logger="plex-webhook"):
+        lights.prepare(ROOM)
+    assert "operation=prepare" in caplog.text
+
+
 # --- Tuya ----------------------------------------------------------------------
 
 

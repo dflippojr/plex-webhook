@@ -74,6 +74,8 @@ GOVEE_LAN_SCAN_MULTICAST_ADDR = "239.255.255.250"
 GOVEE_LAN_LISTEN_PORT = 4002        # devices reply here
 GOVEE_LAN_CONTROL_PORT = 4003       # unicast control commands go here
 GOVEE_LAN_SCAN_TIMEOUT_S = 2.0
+GOVEE_DISCOVERY_TTL_S = 900         # how long a discovered address is reused
+GOVEE_DISCOVERY_MISS_TTL_S = 60     # how long a device that didn't answer is not scanned for again
 # Only RFC 1918 device addresses; is_private also includes special-use ranges.
 GOVEE_LAN_PRIVATE_NETWORKS = tuple(IPv4Network(cidr) for cidr in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
@@ -222,6 +224,34 @@ def _device_secret(device_id: str) -> dict:
 
 # --- Govee ----------------------------------------------------------------
 
+_clock = time.monotonic  # replaced in tests; only the discovery cache uses it
+
+# device id -> (discovered ip, or None when it didn't answer; expiry on _clock).
+# No lock: only the single light worker scans, and concurrent binds of UDP 4002
+# could take each other's replies anyway.
+_govee_addresses = {}
+
+
+def _cached_address(device_id: str) -> tuple:
+    """(hit, ip) for a live cache entry; ip None means the device didn't answer recently."""
+    entry = _govee_addresses.get(device_id)
+    if entry is None or entry[1] <= _clock():
+        return False, None
+    return True, entry[0]
+
+
+def _remember_addresses(device_ids, found: dict) -> None:
+    now = _clock()
+    for device_id in [k for k, (_, expires) in _govee_addresses.items() if expires <= now]:
+        del _govee_addresses[device_id]
+    for device_id in device_ids:
+        ip = found.get(device_id)
+        _govee_addresses[device_id] = (ip, now + (GOVEE_DISCOVERY_TTL_S if ip else GOVEE_DISCOVERY_MISS_TTL_S))
+
+
+def _static_ip(device_id) -> str | None:
+    return _device_secret(device_id).get("ip") if isinstance(device_id, str) else None
+
 
 class GoveeController:
     """Hybrid Govee control: LAN first, Govee Cloud API as fallback.
@@ -242,8 +272,34 @@ class GoveeController:
        {"msg": {"cmd": "brightness", "data": {"value": <1-100>}}}
 
     If a static `ip` is known for a device (config/devices.secrets.yaml),
-    that is used directly and the discovery broadcast is skipped.
+    that is used directly and the discovery broadcast is skipped. Discovered
+    addresses are cached (GOVEE_DISCOVERY_TTL_S), and prepare() resolves every
+    light of an action with one scan.
     """
+
+    def prepare(self, room_lights: list, timeout: float = GOVEE_LAN_SCAN_TIMEOUT_S) -> None:
+        """One scan for every light that has neither a static ip nor a live cache entry."""
+        pending = []
+        for light in room_lights:
+            device_id = light.get("id")
+            if (isinstance(device_id, str) and device_id and device_id not in pending
+                    and not _static_ip(device_id) and not _cached_address(device_id)[0]):
+                pending.append(device_id)
+        if pending:
+            _remember_addresses(pending, self._discover_ips(pending, timeout))
+
+    def _resolve(self, device_id, timeout: float) -> tuple:
+        """(ip, source): the static ip, else the cache, else a scan for this one device."""
+        ip = _static_ip(device_id)
+        if ip:
+            return ip, "device_config"
+        if not isinstance(device_id, str) or not device_id:
+            return None, "none"
+        hit, ip = _cached_address(device_id)
+        if not hit:
+            ip = self._discover_ips([device_id], timeout).get(device_id)
+            _remember_addresses([device_id], {device_id: ip})
+        return ip, "discovery" if ip else "none"
 
     def apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
         try:
@@ -294,9 +350,15 @@ class GoveeController:
     def _read_lan(self, light: dict, timeout: float) -> StateReading:
         device_id = light.get("id")
         deadline = time.monotonic() + timeout
-        ip = _device_secret(device_id).get("ip") or self._discover_ip(device_id, timeout)
+        ip, source = self._resolve(device_id, timeout)
         if not ip:
             return StateReading.failed()
+        reading = self._read_devstatus(ip, deadline)
+        if not reading.ok and source == "discovery":
+            _govee_addresses.pop(device_id, None)  # the lease may have moved: scan again next time
+        return reading
+
+    def _read_devstatus(self, ip: str, deadline: float) -> StateReading:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -347,12 +409,9 @@ class GoveeController:
 
     def _try_lan(self, light: dict, brightness: int) -> Attempt:
         device_id = light.get("id")
-        secret = _device_secret(device_id)
-        ip = secret.get("ip")
-        source = "device_config" if ip else "none"
-
-        if not ip:
-            ip = self._discover_ip(device_id)
+        ip, source = self._resolve(device_id, GOVEE_LAN_SCAN_TIMEOUT_S)
+        if source != "device_config":
+            source = "none"  # a discovered address is not a credential source
 
         if not ip:
             return Attempt("lan", "skipped", "no_address")
@@ -370,9 +429,16 @@ class GoveeController:
             return Attempt("lan", "failed", "send_error", source, tuple(progress))
 
     def _discover_ip(self, device_id: str, timeout: float = GOVEE_LAN_SCAN_TIMEOUT_S) -> str | None:
-        """Best-effort UDP multicast discovery. Returns None on any failure."""
+        """Uncached scan for one device. Returns None on any failure."""
         if not device_id:
             return None
+        return self._discover_ips([device_id], timeout).get(device_id)
+
+    def _discover_ips(self, device_ids: list, timeout: float = GOVEE_LAN_SCAN_TIMEOUT_S) -> dict:
+        """One best-effort multicast scan: device id -> ip for each that answered in time."""
+        found = {}
+        if not device_ids:
+            return found
 
         request = json.dumps({"msg": {"cmd": "scan", "data": {"account_topic": "reserve"}}}).encode("utf-8")
 
@@ -385,7 +451,9 @@ class GoveeController:
             sock.sendto(request, (GOVEE_LAN_SCAN_MULTICAST_ADDR, GOVEE_LAN_SCAN_PORT))
 
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
+            # Stop as soon as every requested device has answered.
+            while len(found) < len(device_ids) and (remaining := deadline - time.monotonic()) > 0:
+                sock.settimeout(remaining)
                 try:
                     data, addr = sock.recvfrom(4096)
                 except socket.timeout:
@@ -394,17 +462,19 @@ class GoveeController:
                     reply = json.loads(data.decode("utf-8"))
                 except (ValueError, RecursionError):
                     continue
-                ip = self._discovery_address(reply, device_id, addr[0])
-                if ip is not None:
-                    return ip
+                for device_id in device_ids:
+                    ip = None if device_id in found else self._discovery_address(reply, device_id, addr[0])
+                    if ip is not None:
+                        found[device_id] = ip
         except OSError:
-            logger.info("reason=discovery_failed brand=govee operation=lan_discovery id=%s fallback=cloud", device_id)
-            return None
+            logger.info("reason=discovery_failed brand=govee operation=lan_discovery devices=%d fallback=cloud",
+                        len(device_ids))
+            return {}
         finally:
             if sock is not None:
                 sock.close()
 
-        return None
+        return found
 
     @staticmethod
     def _discovery_address(reply, device_id: str, source_ip: str) -> str | None:
@@ -694,6 +764,19 @@ def get_controller(brand: str):
     return _controllers.get(brand, _null_controller)
 
 
+def prepare(room_lights: list) -> None:
+    """Resolve the Govee LAN addresses an action needs with one scan. Never raises.
+
+    Optional: read_state and apply_action resolve through the same cache without it.
+    """
+    try:
+        govee = [light for light in room_lights if isinstance(light, dict) and light.get("brand") == "govee"]
+        if govee:
+            _controllers["govee"].prepare(govee)
+    except Exception:
+        logger.info("reason=discovery_failed brand=govee operation=prepare fallback=per_light")
+
+
 def read_state(light: dict, timeout: float | None = None) -> StateReading:
     """Current on/off and brightness percent of one light; any failure is ``StateReading.failed()``."""
     try:
@@ -708,6 +791,7 @@ def apply_action(action: str, lights: list, brightness=None) -> list:
 
     ``brightness`` is a percent for all lights, or a dict of light id -> percent.
     """
+    prepare(lights)
     results = []
     for light in lights:
         level = brightness.get(light.get("id")) if isinstance(brightness, dict) else brightness

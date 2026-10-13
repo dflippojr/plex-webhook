@@ -43,6 +43,14 @@ def block_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", no_dns)
 
 
+@pytest.fixture(autouse=True)
+def empty_govee_address_cache(monkeypatch):
+    """Discovered Govee addresses never leak from one test into the next."""
+    from app import lights
+
+    monkeypatch.setattr(lights, "_govee_addresses", {})
+
+
 ROOMS_YAML = """
 rooms:
   living_room:
@@ -94,6 +102,7 @@ def light_calls(monkeypatch):
     )
     # Reads must never reach a controller; "unreadable" makes dim fall back and restore proceed.
     monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())
+    monkeypatch.setattr(lights, "prepare", lambda room_lights: None)
     return calls
 
 

@@ -37,7 +37,10 @@ class FakeController:
     """Holds what each light 'physically' shows; commands update it like a real light would."""
 
     def __init__(self):
-        self.state, self.commands, self.reads = {}, [], 0
+        self.state, self.commands, self.reads, self.prepared = {}, [], 0, []
+
+    def prepare(self, room_lights):
+        self.prepared.append((self.reads, len(self.commands), [light["id"] for light in room_lights]))
 
     def read_state(self, light, timeout):
         self.reads += 1
@@ -92,6 +95,15 @@ def test_on_light_dims_then_restores_its_own_read_value(world):
     assert world.fake.commands == [("restore", "g1", 60), ("restore", "t1", 35)]
     assert [(t, o) for t, o, _, _ in world.decisions() if o == "restored"] == [("g1", "restored"), ("t1", "restored")]
     assert db.rooms_with_restore_records() == set()
+
+
+def test_each_action_resolves_govee_addresses_once_before_reading(world):
+    world.fake.state = {"g1": on(60), "t1": on(35)}
+    world.play()
+    world.stop()
+    # (reads so far, commands so far, govee lights): once before each action's reads, and again
+    # in apply_action, where the real controller finds every address already cached.
+    assert world.fake.prepared == [(0, 0, ["g1"]), (2, 0, ["g1"]), (2, 2, ["g1"]), (4, 2, ["g1"])]
 
 
 def test_off_light_is_never_turned_on(world):
@@ -345,13 +357,13 @@ def test_govee_falls_back_to_cloud_state(monkeypatch, secrets):
         return types.SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
 
     monkeypatch.setattr(requests, "get", get)
-    monkeypatch.setattr(lights.GoveeController, "_discover_ip", lambda self, device_id, timeout=None: None)
+    monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
     assert lights.read_state(GOVEE) == lights.StateReading(True, True, 42)
     assert seen["params"] == {"device": "AA:BB", "model": "H6159"} and seen["timeout"] == lights.STATE_READ_TIMEOUT_S
 
 
 def test_govee_unreadable_everywhere_fails_without_raising(monkeypatch, secrets):
-    monkeypatch.setattr(lights.GoveeController, "_discover_ip", lambda self, device_id, timeout=None: None)
+    monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
     assert lights.read_state(GOVEE) == lights.StateReading.failed()
 
 
