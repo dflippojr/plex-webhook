@@ -24,6 +24,11 @@
 # the fallback when that brightness could not be read. A light that was off is
 # left off, and one changed by hand while dimmed is left alone.
 #
+# Optional per room: `dim_media_types`, a nonempty list of Plex `Metadata.type`
+# values (e.g. [movie, episode]; trimmed, case-insensitive) that dim the room.
+# A play/resume of any other type, or with no type, leaves the lights alone;
+# pause/stop always restores. Omit or leave null to dim for every type.
+#
 # Optional per Tuya light: `switch_dp` (default 1) and `brightness_dp` (default
 # 3). These data points are unverified on real hardware (issue #4).
 #
@@ -36,6 +41,7 @@ rooms:
     name: "Living Room"
     dim_brightness_percent: 20
     restore_brightness_percent: 100
+    dim_media_types: [movie, episode]   # optional; music or photos on this player won't dim
     plex_clients:
       - title: "TODO: e.g. Living Room Apple TV"
         uuid: null

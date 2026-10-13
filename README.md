@@ -240,7 +240,19 @@ rooms:
         name: "Couch Lamp"
     dim_brightness_percent: 20          # optional, integer 1-100, default 20
     restore_brightness_percent: 100     # optional, integer 1-100, default 100 (fallback only)
+    dim_media_types: [movie, episode]   # optional, omit (or null) to dim for every media type
 ```
+
+**Dimming only for some media.** `dim_media_types` lists the Plex `Metadata.type`
+values that dim the room, matched trimmed and case-insensitive (Plex sends
+`movie`, `episode`, `track`, `photo` and `clip` among others; any string is
+accepted). A `media.play`/`media.resume` of another type, or with no
+`Metadata.type`, is ignored for dispatch: it does not mark the player active, set
+an expiry or trigger automations, though it is still stored, counted in
+`plex_webhook_events_total` and audited as `webhook.receipt` `received/accepted`.
+`media.pause` and `media.stop` are never filtered, so switching from a film to
+music on the same player restores the room and leaves it restored. An empty list
+is rejected on validate/reload.
 
 **One room per Plex player, and lights are not shared.** A room's `plex_clients`
 must hold exactly one entry, and a light `id` may appear in only one room. Several

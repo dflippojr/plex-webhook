@@ -235,6 +235,10 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
     if room_key is None:
         logger.debug("event=%s from unmapped client, ignoring", event)
         return
+    if event in ACTIVATE_EVENTS and not registry.dims_for(room_key, payload):
+        # Pause and stop are never filtered, so this option can never leave a room dimmed.
+        logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
+        return
 
     client_id = _client_id(payload)
     with _state_lock:
