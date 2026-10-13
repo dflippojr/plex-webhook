@@ -21,6 +21,10 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
   activation observation, with empty changes.
 - `rooms.validate`: `validated/valid` or a rejected validation; never records
   configuration changes or activates state.
+- `lights.check`: a read-only `GET /rooms/{room}/lights` by the admin token, with the
+  room key as target: `completed/read`, `rejected/unknown_room` (no target, since the
+  key is not configured), or `failed` with `timed_out`, `queue_overflow`,
+  `superseded` or `check_error`. Per-light readings are never recorded.
 - `service.config_load`: the startup load result, including failure with an
   empty mapping. Its actor is the system. Reload/validation by a valid admin token
   records actor `admin_token`/`owner-admin`, verified (a shared client
@@ -28,7 +32,7 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
   unverified: the webhook is unauthenticated, so a receipt cannot establish that
   Plex sent it. Denied calls are `outcome=denied` with reason `missing_credential`,
   `invalid_credential` or `auth_unconfigured`, an anonymous actor, on
-  `rooms.reload`, `rooms.validate`, `rooms.read` and `clients.read`; at most 20
+  `rooms.reload`, `rooms.validate`, `rooms.read`, `lights.check` and `clients.read`; at most 20
   such rows per minute are written (all are counted in a metric). Plex account/client
   identifiers are payload claims and are omitted from this v1 trail.
 

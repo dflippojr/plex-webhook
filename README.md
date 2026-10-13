@@ -66,6 +66,9 @@ http://127.0.0.1:9800/webhook
   captured events, with event count and last-seen time. Use this to find
   the exact identifiers to put in your local `config/rooms.yaml`.
 - `GET /rooms` (admin token) — the currently loaded room config.
+- `GET /rooms/{room}/lights` (admin token) — read-only check of every light configured for
+  a room: whether it answered, on/off, brightness and which transport answered, without
+  playing anything. See "Checking a room's lights" under Phase 3.
 - `POST /rooms/validate` (admin token) — check the configured room file without activating it.
 - `POST /rooms/reload` (admin token) — reload `config/rooms.yaml` without restarting the
   container (edits to the file otherwise only take effect on restart).
@@ -76,7 +79,7 @@ http://127.0.0.1:9800/webhook
 | --- | --- | --- |
 | `GET /health`, `GET /metrics` | public | none |
 | `POST /webhook` | unauthenticated (Plex cannot be assumed to send credentials) | `plex-server`, unverified |
-| `GET /rooms`, `GET /clients`, `POST /rooms/validate`, `POST /rooms/reload` | `Authorization: Bearer <ADMIN_API_TOKEN>` | `owner-admin`, verified |
+| `GET /rooms`, `GET /rooms/{room}/lights`, `GET /clients`, `POST /rooms/validate`, `POST /rooms/reload` | `Authorization: Bearer <ADMIN_API_TOKEN>` | `owner-admin`, verified |
 
 Missing or wrong credentials return 401; an unset or shorter-than-16-character
 `ADMIN_API_TOKEN` fails closed with 503 `{"detail":"Admin authentication
@@ -272,6 +275,43 @@ curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.
 
 Fix any reported errors and validate again before reloading. Do not
 commit that file.
+
+Then check that each light answers, and over which path, without playing anything:
+
+```powershell
+curl.exe -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/living_room/lights
+```
+
+### Checking a room's lights
+
+`GET /rooms/{room}/lights` (admin token) reads every light configured for the room,
+in config order, and returns:
+
+```json
+{"room": "living_room", "lights": [
+  {"id": "device-id", "brand": "govee", "name": "Couch Lamp",
+   "read": {"ok": true, "on": true, "brightness_percent": 60, "transport": "lan"},
+   "restore_record": false}
+]}
+```
+
+`transport` is the step that answered: `lan` or `cloud` for Govee, `local` or `cloud`
+for Tuya, and `none` when the read failed (`ok: false`, `on` and `brightness_percent`
+null). `brightness_percent` is null for a Tuya light that is off. `restore_record`
+says whether a dim left a pending restore for the light. The check never changes a
+light, a restore record or player state, and the response carries only configured
+identifiers and fixed values, never addresses, keys, device replies or errors.
+
+The reads run on the light-action worker behind any queued dim or restore, because
+Govee LAN reads and discovery share UDP port 4002. Each light can take up to
+`LIGHT_READ_TIMEOUT_S` (default 2 s) per transport. Responses: 404 `{"detail":"Unknown
+room"}` for a room key not in the loaded config, 504 `{"detail":"Light check timed
+out"}` when the reads take longer than 30 s, and 503 when the action queue is full
+(`queue_overflow`, the check never pushes out a queued light action) or a newer
+check of the same room replaced it. Each call is audited as `lights.check` with the
+`owner-admin` actor and the room key as target (`completed/read`,
+`rejected/unknown_room`, `failed/timed_out`, `failed/queue_overflow`, or `denied`
+like the other admin routes); per-light values are not audited.
 
 Dispatch logic (`app/dispatcher.py`): the room's player starting triggers a `dim`
 action for the room's lights; pause/stop triggers `restore`.

@@ -322,7 +322,7 @@ def test_unanswered_room_uses_cloud_when_configured(lan, monkeypatch):
     monkeypatch.setattr(requests, "put", lambda *a, **k: types.SimpleNamespace(raise_for_status=lambda: None))
     readings, results = full_dim()
     assert lan.scans == 1
-    assert readings == [lights.StateReading(True, True, 70)] * 3
+    assert readings == [lights.StateReading(True, True, 70, "cloud")] * 3
     assert [(r.transport, r.outcome) for r in results] == [("cloud", "request_accepted_by_transport")] * 3
     assert [r.attempts[0].reason for r in results] == ["no_address"] * 3
 
@@ -342,7 +342,7 @@ def test_answered_room_is_cached_for_the_ttl(lan):
     lan.status = {ip: on_at(60) for ip in lan.bulbs.values()}
     readings, results = full_dim()
     assert lan.scans == 1
-    assert readings == [lights.StateReading(True, True, 60)] * 3
+    assert readings == [lights.StateReading(True, True, 60, "lan")] * 3
     assert [(r.transport, r.outcome, r.credential_source) for r in results] == [("lan", "command_sent", "none")] * 3
     assert lan.commands[:2] == [("turn", "10.0.0.1"), ("brightness", "10.0.0.1")]
 
@@ -369,7 +369,7 @@ def test_failed_devstatus_at_a_cached_address_scans_again_next_action(lan):
     lan.status = {"10.0.0.7": on_at(40)}
     lights.prepare(room)
     assert lan.scans == 2
-    assert lights.read_state(room[0]) == lights.StateReading(True, True, 40)
+    assert lights.read_state(room[0]) == lights.StateReading(True, True, 40, "lan")
 
 
 def test_static_ip_never_scans(lan, secrets):
@@ -377,7 +377,7 @@ def test_static_ip_never_scans(lan, secrets):
     lan.status = {"192.168.1.1": on_at(50)}
     readings, results = full_dim()
     assert lan.scans == 0
-    assert readings[0] == lights.StateReading(True, True, 50)
+    assert readings[0] == lights.StateReading(True, True, 50, "lan")
     assert [(r.outcome, r.credential_source) for r in results] == [("command_sent", "device_config")] * 3
     assert lights._govee_addresses == {}  # a failed read at a static ip has nothing to drop
 
@@ -414,7 +414,7 @@ def test_batch_scan_stops_once_every_device_answered(fake_socket):
 def test_direct_calls_share_the_cache_without_prepare(lan):
     lan.bulbs = {"G0": "10.0.0.1"}
     lan.status = {"10.0.0.1": on_at(30)}
-    assert lights.read_state(ROOM[0]) == lights.StateReading(True, True, 30)
+    assert lights.read_state(ROOM[0]) == lights.StateReading(True, True, 30, "lan")
     lights.GoveeController().apply("dim", ROOM[0])
     assert lan.scans == 1
     assert lan.commands == [("turn", "10.0.0.1"), ("brightness", "10.0.0.1")]

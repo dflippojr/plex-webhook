@@ -37,7 +37,7 @@ import logging
 import os
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
@@ -123,11 +123,15 @@ class LightResult:
 
 @dataclass(frozen=True)
 class StateReading:
-    """What a light reported: ``ok`` is False when it could not be read at all."""
+    """What a light reported: ``ok`` is False when it could not be read at all.
+
+    ``transport`` names the step that answered (``lan``/``local``/``cloud``), else ``none``.
+    """
 
     ok: bool
     on: bool | None = None
     brightness: int | None = None  # percent, 1-100
+    transport: str = "none"
 
     @staticmethod
     def failed():
@@ -337,14 +341,14 @@ class GoveeController:
 
     def read_state(self, light: dict, timeout: float) -> StateReading:
         """LAN ``devStatus`` first, then the cloud state API. Never raises."""
-        for step in (self._read_lan, self._read_cloud):
+        for transport, step in (("lan", self._read_lan), ("cloud", self._read_cloud)):
             try:
                 reading = step(light, timeout)
             except Exception:
                 logger.info("reason=state_read_failed brand=govee operation=read_state id=%s", light.get("id"))
                 continue
             if reading.ok:
-                return reading
+                return replace(reading, transport=transport)
         return StateReading.failed()
 
     def _read_lan(self, light: dict, timeout: float) -> StateReading:
@@ -629,14 +633,14 @@ class TuyaController:
 
     def read_state(self, light: dict, timeout: float) -> StateReading:
         """Local ``status()`` first, then the Tuya cloud status API. Never raises."""
-        for step in (self._read_local, self._read_cloud):
+        for transport, step in (("local", self._read_local), ("cloud", self._read_cloud)):
             try:
                 reading = step(light, timeout)
             except Exception:
                 logger.info("reason=state_read_failed brand=tuya operation=read_state id=%s", light.get("id"))
                 continue
             if reading.ok:
-                return reading
+                return replace(reading, transport=transport)
         return StateReading.failed()
 
     def _read_local(self, light: dict, timeout: float) -> StateReading:
