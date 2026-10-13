@@ -34,7 +34,7 @@ def _key_path(path, key):
     if key in ("rooms", "plex_clients", "lights", "uuid", "title", "brand", "id", "name", "model",
                "dim_brightness_percent", "restore_brightness_percent", "switch_dp", "brightness_dp",
                "automations", "trigger", "room", "event", "target_room", "action",
-               "allowed_server_uuids", "playback_idle_minutes"):
+               "allowed_server_uuids", "playback_idle_minutes", "dim_media_types"):
         return str(key) if path == "$" else f"{path}.{key}"
     return f"{path}.[key]"
 
@@ -106,6 +106,22 @@ def _integer(entry, field, path, low, high):
     value = entry.get(field)
     if field in entry and (type(value) is not int or not low <= value <= high):
         raise RoomConfigError([{"path": f"{path}.{field}", "code": "expected_percent" if high == 100 else "expected_integer"}])
+
+
+def _media_types(room, path):
+    """Optional list of Plex ``Metadata.type`` values that dim the room; absent or null means every type."""
+    types = room.get("dim_media_types")
+    if types is None:
+        return
+    field = f"{path}.dim_media_types"
+    if not isinstance(types, list):
+        raise RoomConfigError([{"path": field, "code": "expected_list"}])
+    # An empty list would silently stop the room from ever dimming, so it is rejected rather than honored.
+    if not types:
+        raise RoomConfigError([{"path": field, "code": "expected_nonempty_list"}])
+    for index, value in enumerate(types):
+        if not isinstance(value, str) or not value.strip():
+            raise RoomConfigError([{"path": f"{field}[{index}]", "code": "expected_nonempty_string"}])
 
 
 ONE_PLAYER_HINT = "Create one room per Plex player and put each light in the room it belongs to."
@@ -198,6 +214,7 @@ def _validate(data):
         clients = list(_entries(room, "plex_clients", path))
         for field in ("dim_brightness_percent", "restore_brightness_percent"):
             _integer(room, field, path, 1, 100)
+        _media_types(room, path)
         for client, client_path in clients:
             uuid = _string(client, "uuid", client_path)
             title = _string(client, "title", client_path)
@@ -293,6 +310,15 @@ class RoomRegistry:
         server = (payload or {}).get("Server")
         uuid = server.get("uuid") if isinstance(server, dict) else None
         return isinstance(uuid, str) and uuid in allowed
+
+    def dims_for(self, room_key: str, payload: dict) -> bool:
+        """Whether a play of this payload's ``Metadata.type`` may dim the room (trimmed, case-insensitive)."""
+        types = (self.rooms.get(room_key) or {}).get("dim_media_types")
+        if types is None:
+            return True
+        metadata = (payload or {}).get("Metadata")
+        media_type = metadata.get("type") if isinstance(metadata, dict) else None
+        return isinstance(media_type, str) and media_type.strip().lower() in {value.strip().lower() for value in types}
 
     def settings_for(self, room_key: str) -> dict:
         """Dim level and restore fallback in percent, with defaults for omitted fields."""
