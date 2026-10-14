@@ -98,7 +98,7 @@ def light_calls(monkeypatch):
     monkeypatch.setattr(
         lights,
         "apply_action",
-        lambda action, room_lights, brightness=None: calls.append((action, [light["id"] for light in room_lights])),
+        lambda action, room_lights, brightness=None, turn_on=True: calls.append((action, [light["id"] for light in room_lights])),
     )
     # Reads must never reach a controller; "unreadable" makes dim fall back and restore proceed.
     monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())

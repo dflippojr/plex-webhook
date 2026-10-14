@@ -26,7 +26,7 @@ class FakeController:
     def read_state(self, light, timeout):
         return self.state.get(light["id"], lights.StateReading(True, True, 60))
 
-    def apply(self, action, light, brightness=None):
+    def apply(self, action, light, brightness=None, turn_on=True):
         transport, outcome, reason = self.replies[light["id"]]
         self.state[light["id"]] = lights.StateReading(True, True, brightness)
         return lights.LightResult(light["brand"], light["id"], transport, "none", outcome, reason)
@@ -118,7 +118,7 @@ def test_results_are_counted_without_an_audit_context_or_when_audit_writes_fail(
 
 
 def test_a_backend_that_reports_nothing_counts_nothing(monkeypatch):
-    monkeypatch.setattr(lights, "apply_action", lambda action, room_lights, brightness=None: None)
+    monkeypatch.setattr(lights, "apply_action", lambda action, room_lights, brightness=None, turn_on=True: None)
     before = snapshot()
     dispatcher._apply(ROOM, "on", ROOM_LIGHTS, None)
     assert delta(before, snapshot()) == {}

@@ -263,7 +263,7 @@ rooms:
 
 
 def test_dispatcher_error_summary_and_metric_semantics(client, real_lights, monkeypatch):
-    def boom(action, room_lights):
+    def boom(action, room_lights, brightness=None, turn_on=True):
         raise RuntimeError(SENTINEL)
 
     monkeypatch.setattr(lights, "apply_action", boom)

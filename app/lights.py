@@ -305,9 +305,9 @@ class GoveeController:
             _remember_addresses([device_id], {device_id: ip})
         return ip, "discovery" if ip else "none"
 
-    def apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
+    def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
         try:
-            result = self._apply(action, light, brightness)
+            result = self._apply(action, light, brightness, turn_on)
             if isinstance(result, LightResult):
                 return result
             return _fallback_result("govee", light, "unconfirmed", "result_unconfirmed")
@@ -318,17 +318,18 @@ class GoveeController:
             )
             return _fallback_result("govee", light, "failed", "unexpected_error")
 
-    def _apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
+    def _apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
         device_id = light.get("id")
         name = light.get("name", device_id)
         brightness = _level(action, brightness)
 
         attempts = []
         for transport, step in (("lan", self._try_lan), ("cloud", self._try_cloud)):
-            attempt = _attempt_of(step(light, brightness), transport)
+            attempt = _attempt_of(step(light, brightness, turn_on), transport)
             attempts.append(attempt)
             if attempt:
-                logger.info("govee[%s]: %s -> on, brightness=%d%% (%s)", transport, name, brightness, device_id)
+                logger.info("govee[%s]: %s -> %sbrightness=%d%% (%s)", transport, name,
+                            "on, " if turn_on else "", brightness, device_id)
                 return _result("govee", light, attempts)
 
         logger.warning(
@@ -411,7 +412,7 @@ class GoveeController:
             return StateReading.failed()
         return StateReading(True, power == "on", max(1, level))
 
-    def _try_lan(self, light: dict, brightness: int) -> Attempt:
+    def _try_lan(self, light: dict, brightness: int, turn_on: bool = True) -> Attempt:
         device_id = light.get("id")
         ip, source = self._resolve(device_id, GOVEE_LAN_SCAN_TIMEOUT_S)
         if source != "device_config":
@@ -422,8 +423,9 @@ class GoveeController:
 
         progress = []
         try:
-            self._send_lan_command(ip, {"msg": {"cmd": "turn", "data": {"value": 1}}})
-            progress.append("turn")
+            if turn_on:
+                self._send_lan_command(ip, {"msg": {"cmd": "turn", "data": {"value": 1}}})
+                progress.append("turn")
             self._send_lan_command(ip, {"msg": {"cmd": "brightness", "data": {"value": brightness}}})
             progress.append("brightness")
             # UDP has no acknowledgement: the datagrams were sent, nothing more is known.
@@ -510,7 +512,7 @@ class GoveeController:
         finally:
             sock.close()
 
-    def _try_cloud(self, light: dict, brightness: int) -> Attempt:
+    def _try_cloud(self, light: dict, brightness: int, turn_on: bool = True) -> Attempt:
         api_key = os.environ.get("GOVEE_API_KEY")
         if not api_key:
             logger.info("govee[cloud]: GOVEE_API_KEY not set, skipping cloud fallback")
@@ -535,10 +537,11 @@ class GoveeController:
 
         progress = []
         try:
-            turn_body = {"device": device_id, "model": model, "cmd": {"name": "turn", "value": "on"}}
-            resp = requests.put(GOVEE_CLOUD_API_URL, headers=headers, json=turn_body, timeout=5)
-            resp.raise_for_status()
-            progress.append("turn")
+            if turn_on:
+                turn_body = {"device": device_id, "model": model, "cmd": {"name": "turn", "value": "on"}}
+                resp = requests.put(GOVEE_CLOUD_API_URL, headers=headers, json=turn_body, timeout=5)
+                resp.raise_for_status()
+                progress.append("turn")
 
             brightness_body = {
                 "device": device_id,
@@ -568,9 +571,9 @@ class TuyaController:
     the same device id.
     """
 
-    def apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
+    def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
         try:
-            result = self._apply(action, light, brightness)
+            result = self._apply(action, light, brightness, turn_on)
             if isinstance(result, LightResult):
                 return result
             return _fallback_result("tuya", light, "unconfirmed", "result_unconfirmed")
@@ -581,17 +584,18 @@ class TuyaController:
             )
             return _fallback_result("tuya", light, "failed", "unexpected_error")
 
-    def _apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
+    def _apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
         device_id = light.get("id")
         name = light.get("name", device_id)
         brightness = _level(action, brightness)
 
         attempts = []
         for transport, step in (("local", self._try_local), ("cloud", self._try_cloud)):
-            attempt = _attempt_of(step(light, brightness), transport)
+            attempt = _attempt_of(step(light, brightness, turn_on), transport)
             attempts.append(attempt)
             if attempt:
-                logger.info("tuya[%s]: %s -> on, brightness=%d%% (%s)", transport, name, brightness, device_id)
+                logger.info("tuya[%s]: %s -> %sbrightness=%d%% (%s)", transport, name,
+                            "on, " if turn_on else "", brightness, device_id)
                 return _result("tuya", light, attempts)
 
         logger.warning(
@@ -612,10 +616,12 @@ class TuyaController:
         return "unconfirmed"
 
     def _commands(self, send_turn, send_brightness, transport: str, source: str) -> Attempt:
-        """Run turn then brightness, judging each return; stop at the first explicit rejection."""
+        """Run turn (when given) then brightness, judging each return; stop at the first explicit rejection."""
         progress = []
         verdicts = []
         for step, send in (("turn", send_turn), ("brightness", send_brightness)):
+            if send is None:
+                continue
             verdict = self._judge(send())
             if verdict == "rejected":
                 return Attempt(transport, "failed", "tuya_rejected", source, tuple(progress))
@@ -682,7 +688,7 @@ class TuyaController:
             return StateReading.failed()  # on, but no readable level
         return StateReading(True, True, tuya_raw_to_percent(raw))
 
-    def _try_local(self, light: dict, brightness: int) -> Attempt:
+    def _try_local(self, light: dict, brightness: int, turn_on: bool = True) -> Attempt:
         device_id = light.get("id")
         secret = _device_secret(device_id)
         local_key = secret.get("local_key")
@@ -705,15 +711,17 @@ class TuyaController:
             # DP 1 is the conventional switch and DP 3 the brightness dp for Tuya dimmers/bulbs;
             # scale is 10-1000 on most firmware. Both are unverified (#4), hence per-light overrides.
             switch_dp, brightness_dp = self._dps(light)
-            turn_on = device.turn_on if switch_dp == TUYA_DEFAULT_SWITCH_DP else (lambda: device.set_value(switch_dp, True))
-            return self._commands(turn_on,
+            send_turn = None
+            if turn_on:
+                send_turn = device.turn_on if switch_dp == TUYA_DEFAULT_SWITCH_DP else (lambda: device.set_value(switch_dp, True))
+            return self._commands(send_turn,
                                   lambda: device.set_value(brightness_dp, tuya_percent_to_raw(brightness)),
                                   "local", "device_config")
         except Exception:
             logger.info("reason=local_control_failed brand=tuya operation=local_control id=%s fallback=cloud", device_id)
             return Attempt("local", "failed", "send_error", "device_config")
 
-    def _try_cloud(self, light: dict, brightness: int) -> Attempt:
+    def _try_cloud(self, light: dict, brightness: int, turn_on: bool = True) -> Attempt:
         access_id = os.environ.get("TUYA_ACCESS_ID")
         access_key = os.environ.get("TUYA_ACCESS_KEY")
         if not access_id or not access_key:
@@ -731,7 +739,8 @@ class TuyaController:
         try:
             cloud = tinytuya.Cloud(apiRegion="us", apiKey=access_id, apiSecret=access_key)
             return self._commands(
-                lambda: cloud.sendcommand(device_id, [{"code": TUYA_CLOUD_SWITCH_CODE, "value": True}]),
+                (lambda: cloud.sendcommand(device_id, [{"code": TUYA_CLOUD_SWITCH_CODE, "value": True}]))
+                if turn_on else None,
                 lambda: cloud.sendcommand(device_id, [{"code": TUYA_CLOUD_BRIGHTNESS_CODE,
                                                        "value": tuya_percent_to_raw(brightness)}]),
                 "cloud", "environment")
@@ -749,7 +758,7 @@ class NullController:
     def read_state(self, light: dict, timeout: float) -> StateReading:
         return StateReading.failed()
 
-    def apply(self, action: str, light: dict, brightness: int | None = None) -> LightResult:
+    def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
         logger.warning(
             "reason=controller_unavailable brand=unknown operation=apply action=%s id=%s",
             diagnostic_action(action), light.get("id"),
@@ -790,17 +799,18 @@ def read_state(light: dict, timeout: float | None = None) -> StateReading:
     return reading if isinstance(reading, StateReading) else StateReading.failed()
 
 
-def apply_action(action: str, lights: list, brightness=None) -> list:
+def apply_action(action: str, lights: list, brightness=None, turn_on: bool = True) -> list:
     """Apply to every light in order; one failure never stops the rest. Returns LightResults.
 
     ``brightness`` is a percent for all lights, or a dict of light id -> percent.
+    ``turn_on=False`` sends the brightness command alone, for a light that may be off.
     """
     prepare(lights)
     results = []
     for light in lights:
         level = brightness.get(light.get("id")) if isinstance(brightness, dict) else brightness
         try:
-            result = get_controller(light.get("brand")).apply(action, light, level)
+            result = get_controller(light.get("brand")).apply(action, light, level, turn_on)
         except Exception:
             result = None
         if not isinstance(result, LightResult):
