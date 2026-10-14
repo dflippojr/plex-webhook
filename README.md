@@ -410,8 +410,12 @@ Govee is already percent).
   with `LIGHT_READ_TIMEOUT_S`). An **on** light has its brightness stored as its restore
   value and is dimmed to the room's `dim_brightness_percent`. An **off** light is
   recorded as `was_off` and left off; a light is never turned on to dim it. If the read
-  fails the light is still dimmed and the room's `restore_brightness_percent` is its
-  restore value. A value equal to the dim level is never stored, and a re-dim before a
+  fails the light might be off, so it gets the brightness command alone (no `turn`/switch
+  command, so it is not deliberately switched on) and the room's
+  `restore_brightness_percent` is its restore value. Whether a brightness-only command
+  wakes an off bulb is unverified on hardware (#3, #4); if one does, that light is
+  restored to `restore_brightness_percent` on stop. A light that is off at restore time
+  is left alone. A value equal to the dim level is never stored, and a re-dim before a
   pending restore keeps the original value.
 - *On restore*, each recorded light is read again. If it is now off, or its brightness
   differs from the dim level by **more than 5 points**, it was changed by hand and is

@@ -472,8 +472,11 @@ def _skipped(light, reason):
 
 
 def _dim(room_key, room_lights, settings, context, action_id):
-    """Record each light's own brightness, then dim the ones that are on. Never turns a light on."""
-    dim, results, targets = settings["dim"], [], []
+    """Record each light's own brightness, then dim the ones that are on. Never turns a light on.
+
+    A light whose state could not be read may be off, so it gets the brightness command alone.
+    """
+    dim, results, targets, unread = settings["dim"], [], [], []
     lights.prepare(room_lights)  # one Govee discovery scan serves the reads and the commands
     for light in room_lights:
         light_id = _text(light.get("id"))
@@ -503,9 +506,12 @@ def _dim(room_key, room_lights, settings, context, action_id):
             db.put_restore_record(room_key, light_id, False, restore, dim)
         _decide(context, room_key, light, "dim", action_id, "dim_recorded", reason, settings, restore,
                 reading.brightness)
-        targets.append(light)
+        (targets if reading.ok else unread).append(light)
     applied = lights.apply_action("dim", targets, dim) if targets else []
-    return results + applied if isinstance(applied, list) else None
+    unread_applied = lights.apply_action("dim", unread, dim, turn_on=False) if unread else []
+    if not isinstance(applied, list) or not isinstance(unread_applied, list):
+        return None
+    return results + applied + unread_applied
 
 
 def _restore(room_key, room_lights, settings, context, action_id):

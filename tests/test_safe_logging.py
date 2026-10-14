@@ -53,7 +53,7 @@ def test_public_wrapper_and_later_light(monkeypatch, caplog, brand):
     sentinel = "synthetic-wrapper-" + brand
     calls = []
 
-    def apply(action, light, brightness=None):
+    def apply(action, light, brightness=None, turn_on=True):
         calls.append(light["id"])
         if light["id"] == "first":
             raise RuntimeError(sentinel)
@@ -120,7 +120,7 @@ def test_unavailable_controller_omits_free_text(monkeypatch, caplog, brand):
 def test_dispatcher_failure_and_later_action(monkeypatch, caplog, failure_stage):
     sentinel = "synthetic-dispatcher-" + failure_stage
     monkeypatch.setattr(dispatcher.registry, "lights_for", lambda room: [])
-    monkeypatch.setattr(lights, "apply_action", lambda *a: None)
+    monkeypatch.setattr(lights, "apply_action", lambda *a, **k: None)
     target, attribute = (dispatcher.registry, "lights_for") if failure_stage == "lookup" else (lights, "apply_action")
     with caplog.at_level(logging.INFO, logger="plex-webhook"), monkeypatch.context() as patch:
         patch.setattr(target, attribute, fail(sentinel))

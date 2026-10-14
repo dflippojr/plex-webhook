@@ -530,8 +530,8 @@ def test_tuya_unexpected_error_is_caught(monkeypatch, caplog):
 
 def test_apply_action_routes_by_brand(monkeypatch, caplog):
     seen = []
-    monkeypatch.setitem(lights._controllers, "govee", types.SimpleNamespace(apply=lambda a, l, b=None: seen.append(("govee", a))))
-    monkeypatch.setitem(lights._controllers, "tuya", types.SimpleNamespace(apply=lambda a, l, b=None: seen.append(("tuya", a))))
+    monkeypatch.setitem(lights._controllers, "govee", types.SimpleNamespace(apply=lambda a, l, b=None, t=True: seen.append(("govee", a))))
+    monkeypatch.setitem(lights._controllers, "tuya", types.SimpleNamespace(apply=lambda a, l, b=None, t=True: seen.append(("tuya", a))))
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         lights.apply_action("dim", [GOVEE, TUYA, {"brand": "hue", "id": "x"}])
     assert seen == [("govee", "dim"), ("tuya", "dim")]
@@ -559,3 +559,48 @@ def test_load_secrets_missing_or_broken_file(monkeypatch, tmp_path):
     monkeypatch.setattr(lights, "SECRETS_PATH", broken)
     monkeypatch.setattr(lights, "_secrets_cache", None)
     assert lights._load_secrets() == {}
+
+
+# --- brightness only (a light whose state is unknown must not be turned on) -------
+
+
+def test_govee_lan_brightness_only_sends_no_turn(fake_socket, secrets):
+    secrets["AA:BB"] = {"ip": "192.168.1.50"}
+    result = lights.GoveeController().apply("dim", GOVEE, 30, turn_on=False)
+    assert commands(fake_socket) == [("brightness", 30, ("192.168.1.50", 4003))]
+    assert result.progress == ("brightness",)
+
+
+def test_govee_cloud_brightness_only_sends_no_turn(fake_socket, monkeypatch):
+    monkeypatch.setenv("GOVEE_API_KEY", "key")
+    puts = []
+
+    def fake_put(url, headers, json, timeout):
+        puts.append(json["cmd"])
+        return types.SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr(requests, "put", fake_put)
+    result = lights.GoveeController().apply("dim", GOVEE, 30, turn_on=False)
+    assert puts == [{"name": "brightness", "value": 30}]
+    assert (result.transport, result.progress) == ("cloud", ("brightness",))
+
+
+@pytest.mark.parametrize("light,expected", [
+    (TUYA, [("local", "plug1", "10.0.0.5", "k"), ("set_value", 3, 300)]),
+    ({**TUYA, "switch_dp": 20, "brightness_dp": 22}, [("local", "plug1", "10.0.0.5", "k"), ("set_value", 22, 300)]),
+])
+def test_tuya_local_brightness_only_sends_no_switch(monkeypatch, secrets, light, expected):
+    secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.5"}
+    fake = install_tinytuya(monkeypatch)
+    result = lights.apply_action("dim", [light], 30, turn_on=False)[0]
+    assert fake.log == expected
+    assert result.progress == ("brightness",)
+
+
+def test_tuya_cloud_brightness_only_sends_no_switch(monkeypatch):
+    monkeypatch.setenv("TUYA_ACCESS_ID", "id")
+    monkeypatch.setenv("TUYA_ACCESS_KEY", "secret")
+    fake = install_tinytuya(monkeypatch)
+    result = lights.TuyaController().apply("dim", TUYA, 30, turn_on=False)
+    assert fake.log == [("cloud", "id"), ("cmd", "plug1", "bright_value_v2", 300)]
+    assert (result.transport, result.progress) == ("cloud", ("brightness",))

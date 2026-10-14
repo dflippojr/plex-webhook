@@ -37,7 +37,7 @@ class FakeController:
     """Holds what each light 'physically' shows; commands update it like a real light would."""
 
     def __init__(self):
-        self.state, self.commands, self.reads, self.prepared = {}, [], 0, []
+        self.state, self.commands, self.reads, self.prepared, self.unpowered = {}, [], 0, [], []
 
     def prepare(self, room_lights):
         self.prepared.append((self.reads, len(self.commands), [light["id"] for light in room_lights]))
@@ -49,8 +49,10 @@ class FakeController:
             raise value
         return value
 
-    def apply(self, action, light, brightness=None):
+    def apply(self, action, light, brightness=None, turn_on=True):
         self.commands.append((action, light["id"], brightness))
+        if not turn_on:
+            self.unpowered.append(light["id"])
         self.state[light["id"]] = on(brightness)
         return lights.LightResult(light["brand"], light["id"], "lan", "none", "command_sent", "lan_command_sent")
 
@@ -143,6 +145,7 @@ def test_read_failure_at_dim_time_falls_back_to_room_restore_value(world):
     world.fake.state = {"g1": RuntimeError("unreachable")}
     world.play()
     assert ("dim", "g1", 30) in world.fake.commands  # still dimmed
+    assert world.fake.unpowered == ["g1"]  # by the brightness command alone, never a turn on
     world.fake.state["g1"] = on(30)
     world.fake.commands.clear()
     world.stop()
@@ -453,3 +456,55 @@ def test_tuya_commands_use_configured_data_points_and_the_requested_level(monkey
     RecordingDevice.log = []
     lights.apply_action("dim", [{**TUYA, "switch_dp": 20, "brightness_dp": 22}], 30)
     assert RecordingDevice.log == [("set_value", 20, True), ("set_value", 22, 300)]
+
+
+def test_dim_turns_on_only_the_lights_it_could_read(world):
+    world.fake.state = {"g1": RuntimeError("unreachable"), "t1": on(40)}
+    world.play()
+    assert world.fake.commands == [("dim", "t1", 30), ("dim", "g1", 30)]
+    assert world.fake.unpowered == ["g1"]
+
+
+class OffPlug:
+    """A Tuya plug that is off; ``reads_fail`` makes its status() time out."""
+
+    on, raw, reads_fail, log = False, 500, True, []
+
+    def __init__(self, *args):
+        pass
+
+    set_version = set_socketTimeout = lambda self, value: None
+
+    def status(self):
+        if OffPlug.reads_fail:
+            raise OSError("timed out")
+        return {"dps": {"1": OffPlug.on, "3": OffPlug.raw}}
+
+    def turn_on(self):
+        OffPlug.on = True
+        OffPlug.log.append("turn_on")
+        return {"success": True}
+
+    def set_value(self, dp, value):
+        OffPlug.raw = value
+        OffPlug.log.append(("set_value", dp, value))
+        return {"success": True}
+
+
+def test_unreadable_off_light_is_not_turned_on(rooms_file, registry, secrets, monkeypatch):
+    rooms_file.write_text("rooms:\n  den:\n    plex_clients:\n      - title: Den TV\n"
+                          "    lights:\n      - {brand: tuya, id: plug1}\n", encoding="utf-8")
+    registry.reload()
+    secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.7"}
+    fake = types.ModuleType("tinytuya")
+    fake.OutletDevice = OffPlug
+    monkeypatch.setitem(sys.modules, "tinytuya", fake)
+    OffPlug.on, OffPlug.raw, OffPlug.reads_fail, OffPlug.log = False, 500, True, []
+    dispatcher.handle_event(payload("media.play", "Den TV"))
+    drain()
+    assert OffPlug.log == [("set_value", 3, 200)]
+    OffPlug.reads_fail = False
+    dispatcher.handle_event(payload("media.stop", "Den TV"))
+    drain()
+    assert OffPlug.on is False
+    assert "turn_on" not in OffPlug.log
