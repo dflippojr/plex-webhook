@@ -307,7 +307,7 @@ async def plex_webhook(request: Request):
             _reject_oversized("too_many_files")
         if detail.startswith("Too many fields"):
             _reject_oversized("too_many_fields")
-        if detail.startswith("Part exceeded"):
+        if detail.startswith(("Part exceeded", "Field exceeded")):
             _reject_oversized("field_too_large")
         _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
         raise HTTPException(status_code=400, detail="Invalid webhook form") from None
@@ -322,9 +322,11 @@ async def plex_webhook(request: Request):
     if payload_raw is not None:
         try:
             payload = json.loads(payload_raw)
+            # Nesting that loads but cannot be serialized again must not reach the storage writes below.
+            json.dumps({"payload": payload})
             decoded_payload = payload
             reason = "accepted" if _valid_payload(payload) else "invalid_payload"
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             reason = "invalid_json"
             logger.warning("payload field present but not valid JSON")
     if reason != "accepted":
@@ -422,4 +424,26 @@ def _valid_payload(payload):
     for name in ("type", "title", "grandparentTitle", "ratingKey"):
         if metadata.get(name) is not None and not isinstance(metadata[name], (str, int, float)):
             return False
+    return all(_storable(value) for value in _stored_values(payload))
+
+
+def _stored_values(payload):
+    """The payload values insert_event binds to SQLite."""
+    yield payload["event"]
+    for group, names in (("Account", ("title",)), ("Player", ("uuid", "title")),
+                         ("Metadata", ("type", "title", "grandparentTitle", "ratingKey"))):
+        fields = payload.get(group) or {}
+        for name in names:
+            yield fields.get(name)
+
+
+def _storable(value):
+    """False for what SQLite or UTF-8 cannot take: a lone surrogate or an integer beyond 64 bits."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+    elif isinstance(value, int):
+        return -(2 ** 63) <= value < 2 ** 63
     return True
