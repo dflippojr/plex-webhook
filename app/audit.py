@@ -98,7 +98,8 @@ OPERATIONS = {
         "completed_unverified": {"all_sent"}, "partial": {"mixed_results"},
         "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
         "failed": {"all_failed", "dispatcher_error"},
-        "skipped": {"all_skipped", "no_lights", "own_playback_active", "superseded", "queue_overflow"},
+        "skipped": {"all_skipped", "no_lights", "own_playback_active", "owned_by_newer_source", "superseded",
+                    "queue_overflow"},
     }),
 }
 LIGHT_REQUESTS = {"dim", "restore"}
