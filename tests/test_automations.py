@@ -69,6 +69,28 @@ def test_explicit_restore_action_and_latest_trigger(world):
     assert world.commands == before + [("restore", "a", 80)]
 
 
+def test_older_source_explicit_restore_cannot_undo_newer_automation(world):
+    world.configure([rule(), rule(event="restore", action="restore"), rule("c", action=60)])
+    event("a")
+    event("c")
+    assert world.state["b"].brightness == 60 and db.automation_targets("c") == {"b"}
+    event("a", "media.stop")
+    assert world.state["b"].brightness == 60
+    assert db.automation_targets("c") == {"b"}
+    event("c", "media.stop")
+    assert world.state["b"].brightness == 80
+    assert db.automation_targets("c") == set()
+    assert db.rooms_with_restore_records() == set()
+
+
+def test_explicit_restore_still_acts_on_unowned_and_own_targets(world):
+    world.configure([rule(event="restore", action="restore")])
+    event("a")
+    db.set_automation_owner("b", None)  # nobody owns the pending restore record
+    event("a", "media.stop")
+    assert world.state["b"].brightness == 80
+
+
 @pytest.mark.parametrize("target_action", [40, "restore"])
 def test_target_playback_blocks_automation_dim_and_restore(world, target_action):
     world.configure([rule(action=target_action), rule(event="restore", action=target_action)])

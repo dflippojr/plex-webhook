@@ -172,6 +172,14 @@ def set_automation_owner(target_room, trigger_room):
                          (target_room, trigger_room))
 
 
+def automation_owner(target_room):
+    """The trigger room that owns the target's pending automatic restore, or None."""
+    with closing(_restore_conn()) as conn:
+        row = conn.execute("SELECT trigger_room FROM automation_room_owners WHERE target_room = ?",
+                           (target_room,)).fetchone()
+    return row[0] if row else None
+
+
 def automation_targets(trigger_room):
     with closing(_restore_conn()) as conn:
         return {row[0] for row in conn.execute(

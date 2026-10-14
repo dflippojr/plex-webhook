@@ -385,7 +385,11 @@ for the same trigger run in list order). It retains the brightness from before
 the first dim and updates the expected dim level for the manual-change check.
 Only the latest source owns the pending automatic restore: restoring an older
 source cannot undo a newer automation. A source's restore first puts back its
-owned targets, then runs its explicit `restore` entries. Thus a brightness
+owned targets, then runs its explicit `restore` entries. On a `restore` trigger, an
+explicit `restore` entry acts only on a target the source owns or nobody owns; it
+skips a target owned by another source (audited as `skipped/owned_by_newer_source`),
+leaving that source's automation for its own restore. An explicit `restore` entry on
+a `dim` trigger still applies, as the latest trigger. Thus a brightness
 action on a restore trigger remains until the source's next restore or a newer
 action on the target. A manual brightness change or switching a light off blocks
 restoration, using the same five-point tolerance described below.

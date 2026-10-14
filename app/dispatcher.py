@@ -296,12 +296,14 @@ def _run_automations(source, event, entries, snapshots, blocked, context):
             for target in sorted(db.automation_targets(source)):
                 _automation_action(source, target, "restore", snapshots, blocked, context)
         for entry in entries:
-            _automation_action(source, entry["target_room"], entry["action"], snapshots, blocked, context)
+            # A restore trigger's explicit restore yields to a newer source's automation on the target.
+            _automation_action(source, entry["target_room"], entry["action"], snapshots, blocked, context,
+                               yield_to_owner=event == "restore" and entry["action"] == "restore")
     except Exception:
         logger.error("reason=dispatcher_action_failed operation=automation")
 
 
-def _automation_action(source, target, action, snapshots, blocked, context):
+def _automation_action(source, target, action, snapshots, blocked, context, yield_to_owner=False):
     if target not in snapshots:
         return
     room_lights, settings = snapshots[target]
@@ -312,6 +314,10 @@ def _automation_action(source, target, action, snapshots, blocked, context):
     action_id = audit.correlation_id()
     if target in blocked:
         _record(context, "light.action_summary", "skipped", "own_playback_active",
+                target, action, action_id, counts={})
+        return
+    if yield_to_owner and db.automation_owner(target) not in (None, source):
+        _record(context, "light.action_summary", "skipped", "owned_by_newer_source",
                 target, action, action_id, counts={})
         return
     _record(context, "light.action_queued", "queued", "accepted", target, action, action_id,
