@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from prometheus_client import REGISTRY
 
-from conftest import drain, payload, post
+from conftest import drain, payload, post, rows
 
 
 def test_health(client):
@@ -347,3 +347,57 @@ def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
     conn = appdb.get_connection()
     assert conn.execute("SELECT raw_truncated FROM events").fetchall() == [(0,)]
     conn.close()
+
+
+def test_urlencoded_oversized_field_is_413_and_stores_nothing(client):
+    before = _rejected("field_too_large")
+    resp = client.post("/webhook", data={"payload": "x" * (600 * 1024)})
+    assert resp.status_code == 413
+    assert _stored(client) == (0, False)
+    assert _rejected("field_too_large") == before + 1
+
+
+def _hostile_post(client, raw):
+    resp = client.post("/webhook", files={"payload": (None, raw)})
+    assert resp.status_code == 200
+    assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    assert len(client.log.read_text().splitlines()) == 1
+    return rows(client)[0]
+
+
+@pytest.mark.parametrize("raw", [
+    '{"event":"media.play","Player":{"title":"\\ud800"}}',
+    '{"event":"media.play","Account":{"title":"\\udfff"}}',
+    '{"event":"\\ud800"}',
+    '{"event":"media.play","Metadata":{"title":"a\\ud800b"}}',
+    '{"event":"media.play","Metadata":{"ratingKey":18446744073709551616}}',
+    '{"event":"media.play","Metadata":{"type":-9223372036854775809}}',
+])
+def test_unstorable_payload_is_rejected_not_500(client, light_calls, raw):
+    receipt = _hostile_post(client, raw)
+    assert (receipt["outcome"], receipt["reason_code"]) == ("rejected", "invalid_payload")
+    drain()
+    assert light_calls == []
+
+
+def test_signed_64_bit_extremes_are_still_stored(client):
+    body = {"event": "library.new", "Metadata": {"ratingKey": 2 ** 63 - 1, "title": -(2 ** 63)}}
+    assert post(client, body).status_code == 200
+    assert client.conn.execute("SELECT rating_key, title FROM events").fetchone() == (str(2 ** 63 - 1), str(-(2 ** 63)))
+
+
+@pytest.mark.parametrize("metadata", ['"duration":1' + "0" * 400, '"duration":1000,"viewOffset":1' + "0" * 400])
+def test_huge_integer_duration_falls_back_to_idle_expiry(client, light_calls, metadata):
+    raw = '{"event":"media.play","Player":{"title":"Living Room TV"},"Metadata":{%s}}' % metadata
+    receipt = _hostile_post(client, raw)
+    assert (receipt["outcome"], receipt["reason_code"]) == ("received", "accepted")
+    drain()
+    drain()
+    assert light_calls == [("dim", ["AA:BB"])]
+
+
+def test_deeply_nested_json_is_invalid_json_not_500(client, light_calls):
+    receipt = _hostile_post(client, '{"event":"media.play","x":' + "[" * 5000 + "]" * 5000 + "}")
+    assert (receipt["outcome"], receipt["reason_code"]) == ("rejected", "invalid_json")
+    drain()
+    assert light_calls == []

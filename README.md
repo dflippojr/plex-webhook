@@ -148,7 +148,10 @@ capture available; a missing startup file also leaves dispatch disabled.
 Each accepted delivery is appended as a JSON line to `./data/events.jsonl`:
 `received_at`, `event` type, full decoded `payload`, and any attachment
 metadata (e.g. thumbnail). This includes deliveries whose payload is missing or
-not valid JSON. It does **not** include requests rejected before storage:
+not valid JSON, including JSON nested too deeply to parse (`invalid_json`) and a
+payload SQLite cannot store, such as a lone UTF-16 surrogate or an integer beyond
+64 bits in a stored field (`invalid_payload`); both return 200 and are not dispatched.
+It does **not** include requests rejected before storage:
 `invalid_form` (400), oversized requests (413) and handler crashes leave no
 `events.jsonl` line or `events` row (the audit trail and metrics still note
 them where applicable).

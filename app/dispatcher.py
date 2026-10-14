@@ -200,7 +200,13 @@ def _client_id(payload: dict) -> str:
 
 
 def _milliseconds(value):
-    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+    if type(value) not in (int, float):
+        return None
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:  # an int too large for a float
+        return None
+    return value if finite and value >= 0 else None
 
 
 def _expires_at(payload: dict, now: float) -> float:
