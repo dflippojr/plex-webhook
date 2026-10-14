@@ -396,8 +396,24 @@ def test_huge_integer_duration_falls_back_to_idle_expiry(client, light_calls, me
     assert light_calls == [("dim", ["AA:BB"])]
 
 
-def test_deeply_nested_json_is_invalid_json_not_500(client, light_calls):
+def test_deeply_nested_json_is_never_500(client, light_calls):
     receipt = _hostile_post(client, '{"event":"media.play","x":' + "[" * 5000 + "]" * 5000 + "}")
+    # Interpreters that cannot parse this depth reject it; newer ones store it like any payload.
+    assert (receipt["outcome"], receipt["reason_code"]) in {("rejected", "invalid_json"), ("received", "accepted")}
+
+
+def test_nesting_beyond_the_recursion_limit_is_invalid_json(client, light_calls, monkeypatch):
+    import app.main as main
+
+    real_loads = json.loads
+
+    def too_deep(text, *args, **kwargs):
+        if text == '{"event":"media.play"}':
+            raise RecursionError
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(main.json, "loads", too_deep)
+    receipt = _hostile_post(client, '{"event":"media.play"}')
     assert (receipt["outcome"], receipt["reason_code"]) == ("rejected", "invalid_json")
     drain()
     assert light_calls == []
