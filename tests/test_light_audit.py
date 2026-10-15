@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 import requests
+from prometheus_client import REGISTRY
 
 from app import audit, audit_cli, dispatcher, lights
 from conftest import drain, payload, post, records, rows
@@ -266,21 +267,34 @@ def test_dispatcher_error_summary_and_metric_semantics(client, real_lights, monk
     def boom(action, room_lights, brightness=None, turn_on=True):
         raise RuntimeError(SENTINEL)
 
+    def completed(action):
+        return REGISTRY.get_sample_value(
+            "plex_dispatcher_actions_total", {"room": "living_room", "action": action}) or 0
+
+    def send(event):
+        response = post(client, payload(event, uuid="uuid-living"))
+        assert response.status_code == 200
+        assert response.json() == {"status": "received", "event": event}
+        drain()  # finish each action before another edge can supersede it
+
     monkeypatch.setattr(lights, "apply_action", boom)
-    labels = {"room": "living_room", "action": "dim"}
-    before = dispatcher.DISPATCH_ACTIONS_TOTAL.labels(**labels)._value.get()
-    assert post(client, payload("media.play", uuid="uuid-living")).json() == {"status": "received", "event": "media.play"}
-    drain()
+    before = {action: completed(action) for action in ("dim", "restore")}
+    send("media.play")
     summary = [r for r in rows(client) if r["action"] == "light.action_summary"][0]
     assert (summary["outcome"], summary["reason_code"]) == ("failed", "dispatcher_error")
-    assert dispatcher.DISPATCH_ACTIONS_TOTAL.labels(**labels)._value.get() == before
+    assert completed("dim") == before["dim"]
 
     monkeypatch.setattr(lights, "apply_action", REAL_APPLY_ACTION)
-    post(client, payload("media.stop", uuid="uuid-living"))
-    post(client, payload("media.play", uuid="uuid-living"))
-    drain()
+    send("media.stop")
+    assert completed("restore") == before["restore"] + 1
+    assert completed("dim") == before["dim"]
+    send("media.play")
     # Every light skipped or failed, yet the counter still counts the completed dispatcher call.
-    assert dispatcher.DISPATCH_ACTIONS_TOTAL.labels(**labels)._value.get() == before + 1
+    assert completed("dim") == before["dim"] + 1
+    assert completed("restore") == before["restore"] + 1
+    summaries = [r for r in rows(client) if r["action"] == "light.action_summary"]
+    assert [r["detail"]["request"] for r in summaries] == ["dim", "restore", "dim"]
+    assert all(r["reason_code"] != "dispatcher_error" for r in summaries[1:])
 
 
 def test_backend_that_returns_nothing_is_unconfirmed(client):
