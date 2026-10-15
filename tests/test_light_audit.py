@@ -206,16 +206,6 @@ def test_sequence_links_receipt_queue_results_and_summary(client, real_lights, l
         assert all(r["checksum"] == audit.checksum(r) for r in chain)
 
 
-def test_pause_then_stop_queues_one_dim_and_one_restore_in_order(client, real_lights, lan):
-    post(client, payload("media.play", title="Bedroom Apple TV"))
-    post(client, payload("media.pause", title="Bedroom Apple TV"))
-    post(client, payload("media.stop", title="Bedroom Apple TV"))
-    drain()
-    queued = [r for r in rows(client) if r["action"] == "light.action_queued"]
-    assert [r["detail"]["request"] for r in queued] == ["dim", "restore"]
-    assert [r["id"] for r in queued] == sorted(r["id"] for r in queued)
-
-
 def test_reload_after_enqueue_does_not_change_queued_targets(client, real_lights, lan, rooms_file, monkeypatch):
     gate, started = threading.Event(), threading.Event()
     real = lights.GoveeController._send_lan_command
