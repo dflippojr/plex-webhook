@@ -85,14 +85,26 @@ def dropped(room, reason):
 
 def test_same_key_keeps_only_the_latest_at_the_back():
     queue = dispatcher.ActionQueue(limit=8, name="test-queue")
-    release = threading.Event()
+    release, started = threading.Event(), threading.Event()
     ran, drops = [], []
-    queue.submit(release.wait, 10)
-    first = queue.submit(ran.append, "x1", key="x", on_drop=drops.append)
-    queue.submit(ran.append, "y1", key="y")
-    last = queue.submit(ran.append, "x2", key="x", on_drop=drops.append)
-    assert queue.pending() == 2
-    release.set()
+
+    def block():
+        started.set()
+        assert release.wait(timeout=30)
+
+    blocker = queue.submit(block)
+    try:
+        assert started.wait(timeout=5)
+        first = queue.submit(ran.append, "x1", key="x", on_drop=drops.append)
+        queue.submit(ran.append, "y1", key="y")
+        last = queue.submit(ran.append, "x2", key="x", on_drop=drops.append)
+        assert queue.pending() == 2
+    finally:
+        release.set()
+        try:
+            blocker.result(timeout=5)
+        finally:
+            queue.submit(lambda: None).result(timeout=5)
     last.result(timeout=5)
     assert ran == ["y1", "x2"]
     assert first.cancelled() and drops == ["superseded"]
@@ -154,14 +166,23 @@ def test_alternating_edges_leave_one_pending_action_and_the_last_state(world, tr
 def test_coalesced_restore_after_an_applied_dim_restores(world, trail):
     event("a", "media.play", trail.context)
     drain()
-    release = threading.Event()
-    dispatcher._action_executor.submit(release.wait, 10)
+    release, started = threading.Event(), threading.Event()
+
+    def block():
+        started.set()
+        assert release.wait(timeout=30)
+
+    blocker = dispatcher._action_executor.submit(block)
     try:
+        assert started.wait(timeout=5)
         for name in ["media.stop", "media.play", "media.stop"]:
             event("a", name, trail.context)
     finally:
         release.set()
-        drain()
+        try:
+            blocker.result(timeout=5)
+        finally:
+            drain()
     assert world.commands == [("dim", "a", 20), ("restore", "a", 80)]
     assert db.rooms_with_restore_records() == set()
 
