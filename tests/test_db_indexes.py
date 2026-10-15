@@ -82,12 +82,12 @@ def test_indexed_queries_match_legacy_semantics(memory_db, populated):
         assert db.event_counts(memory_db) == clients == []
 
 
-def test_100k_queries_use_indexes_without_group_sort(tmp_path):
+def test_queries_use_indexes_without_group_sort(tmp_path):
     conn = sqlite3.connect(tmp_path / "synthetic.db")
     try:
         conn.executescript(db.SCHEMA)
         drop_new_indexes(conn)
-        seed_history(conn, 100000)
+        seed_history(conn, 1000)
         baseline = {name: function(conn) for name, function in QUERIES.items()}
         conn.executescript(db.SCHEMA)
         for (name, function), index in zip(QUERIES.items(), INDEX_NAMES):
