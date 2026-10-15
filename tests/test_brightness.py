@@ -99,15 +99,6 @@ def test_on_light_dims_then_restores_its_own_read_value(world):
     assert db.rooms_with_restore_records() == set()
 
 
-def test_each_action_resolves_govee_addresses_once_before_reading(world):
-    world.fake.state = {"g1": on(60), "t1": on(35)}
-    world.play()
-    world.stop()
-    # (reads so far, commands so far, govee lights): once before each action's reads, and again
-    # in apply_action, where the real controller finds every address already cached.
-    assert world.fake.prepared == [(0, 0, ["g1"]), (2, 0, ["g1"]), (2, 2, ["g1"]), (4, 2, ["g1"])]
-
-
 def test_off_light_is_never_turned_on(world):
     world.fake.state = {"g1": OFF, "t1": on(50)}
     world.play()

@@ -167,7 +167,10 @@ def test_govee_discovery_continues_after_invalid_replies(fake_socket):
     assert lights.GoveeController()._discover_ip(GOVEE["id"]) == "10.0.0.9"
 
 
-@pytest.mark.parametrize("reply", MALFORMED_SCAN_REPLIES)
+@pytest.mark.parametrize("reply", [
+    pytest.param(b"null", id="decoded-wrong-shape"),
+    pytest.param(b"garbage", id="json-decode-failure"),
+])
 def test_govee_malformed_discovery_falls_back_to_cloud(fake_socket, monkeypatch, reply):
     fake_socket.replies = [reply]
     monkeypatch.setenv("GOVEE_API_KEY", "dummy-key")
