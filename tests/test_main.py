@@ -38,6 +38,8 @@ def test_webhook_received_at_always_has_microseconds(client, monkeypatch):
     expected = "2026-07-18T12:00:00.000000+00:00"
     assert json.loads(client.log.read_text().splitlines()[0])["received_at"] == expected
     assert client.conn.execute("SELECT received_at FROM events").fetchall() == [(expected,)]
+    drain()
+    drain()
 
 
 def test_webhook_invalid_json_still_200_and_recorded(client, light_calls):
