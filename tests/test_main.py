@@ -417,3 +417,18 @@ def test_nesting_beyond_the_recursion_limit_is_invalid_json(client, light_calls,
     assert (receipt["outcome"], receipt["reason_code"]) == ("rejected", "invalid_json")
     drain()
     assert light_calls == []
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_nan_and_infinity_tokens_are_invalid_json(client, light_calls, token):
+    raw = ('{"event":"media.play","Account":{"title":"dan"},"Player":{"title":"Living Room TV","uuid":"uuid-living"},'
+           '"Metadata":{"type":"movie","duration":%s,"ratingKey":"42"}}' % token)
+    receipt = _hostile_post(client, raw)
+    assert (receipt["action"], receipt["outcome"], receipt["reason_code"]) == ("webhook.receipt", "rejected", "invalid_json")
+    line = client.log.read_text(encoding="utf-8").splitlines()[-1]
+    assert token not in line
+    assert json.loads(line)["payload"] is None
+    assert client.conn.execute("SELECT raw_payload FROM events").fetchone()[0] == "null"
+    drain()
+    drain()
+    assert light_calls == []

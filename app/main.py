@@ -322,8 +322,9 @@ async def plex_webhook(request: Request):
     if payload_raw is not None:
         try:
             payload = json.loads(payload_raw)
-            # Nesting that loads but cannot be serialized again must not reach the storage writes below.
-            json.dumps({"payload": payload})
+            # Nesting that loads but cannot be serialized again, and NaN/Infinity that would be
+            # written back as non-JSON tokens, must not reach the storage writes below.
+            json.dumps({"payload": payload}, allow_nan=False)
             decoded_payload = payload
             reason = "accepted" if _valid_payload(payload) else "invalid_payload"
         except (ValueError, TypeError, RecursionError):
