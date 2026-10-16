@@ -268,3 +268,55 @@ def test_sweeper_expires_with_playback_expiry_context_and_survives_errors(monkey
     assert sleeps == [main.EXPIRY_SWEEP_SECONDS] * 3
     assert len(calls) == 2  # a failed sweep does not stop the next one
     assert calls[1]() == (None, "playback_expiry")
+
+
+NO_LIVING_ROOM = "rooms:\n  bedroom:" + ROOMS_YAML.split("  bedroom:")[1]
+RENAMED = ROOMS_YAML.replace("  living_room:\n", "  lounge:\n")
+
+
+def gauge_rooms(scrape):
+    return {line.split('room="')[1].split('"')[0] for line in scrape.splitlines()
+            if line.startswith("plex_dispatcher_room_active_sessions{")}
+
+
+def test_reload_drops_the_gauge_of_a_removed_room(client, rooms_file, light_calls):
+    assert post(client, payload("media.play")).status_code == 200
+    drain()
+    rooms_file.write_text(NO_LIVING_ROOM, encoding="utf-8")
+    assert client.post("/rooms/reload").status_code == 200
+    assert gauge_rooms(client.get("/metrics").text) == {"bedroom"}
+    assert post(client, payload("media.stop")).status_code == 200  # the player stops
+    drain()
+    assert gauge_rooms(client.get("/metrics").text) == {"bedroom"}
+
+
+def test_reload_drops_the_old_key_of_a_renamed_room(client, rooms_file, light_calls):
+    assert post(client, payload("media.play")).status_code == 200
+    drain()
+    rooms_file.write_text(RENAMED, encoding="utf-8")
+    assert client.post("/rooms/reload").status_code == 200
+    assert post(client, payload("media.stop")).status_code == 200
+    drain()
+    scrape = client.get("/metrics").text
+    assert gauge_rooms(scrape) == {"lounge", "bedroom"}
+    assert 'plex_dispatcher_room_active_sessions{room="lounge"} 0.0' in scrape
+
+
+def test_expiry_of_a_removed_room_restores_without_reexporting_its_gauge(registry, rooms_file, light_calls, clock,
+                                                                          monkeypatch):
+    lifecycle = []
+    original = dispatcher._dispatch_lifecycle
+    monkeypatch.setattr(dispatcher, "_dispatch_lifecycle",
+                        lambda room_key, action, context: (lifecycle.append((room_key, action)),
+                                                           original(room_key, action, context)))
+    labels = {"room": "living_room"}
+    before = REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) or 0
+    send("media.play")
+    rooms_file.write_text(NO_LIVING_ROOM, encoding="utf-8")
+    registry.reload()
+    dispatcher.init_room_gauges()
+    clock.advance(6 * HOUR)
+    expire()
+    assert lifecycle == [("living_room", "dim"), ("living_room", "restore")]
+    assert REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) == before + 1
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) is None
