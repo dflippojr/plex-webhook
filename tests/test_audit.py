@@ -225,3 +225,34 @@ def test_event_retention_explicit_log_path_and_missing_log(tmp_path, capsys):
     other.unlink()
     assert audit_cli.main(["--db", str(path), "prune"]) == 0
     assert json.loads(capsys.readouterr().out)["event_log_eligible"] == 0
+
+
+def _boundary_prune(tmp_path, received_values, log_received):
+    path = tmp_path / "events.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(db.SCHEMA + audit.SCHEMA)
+        for received in received_values:
+            db.insert_event(conn, received, "media.play", {"event": "media.play"}, "{}")
+    log = tmp_path / "events.jsonl"
+    log.write_text(json.dumps({"received_at": log_received, "event": "media.play"}) + "\n", encoding="utf-8")
+    now = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)  # cutoff = 2026-07-18T12:00:00.000000+00:00
+    with audit_cli.open_database(path, writable=True) as conn:
+        result = audit_cli.prune(conn, apply=True, now=now, events_log=log)
+    with sqlite3.connect(path) as conn:
+        kept = [r[0] for r in conn.execute("SELECT received_at FROM events ORDER BY id")]
+    return result, kept
+
+
+def test_prune_retains_events_received_exactly_on_cutoff_in_either_shape(tmp_path):
+    shapes = ["2026-07-18T12:00:00+00:00", "2026-07-18T12:00:00.000000+00:00"]
+    result, kept = _boundary_prune(tmp_path, shapes, shapes[0])
+    assert result["events_eligible"] == result["events_deleted"] == 0
+    assert result["event_log_removed"] == 0
+    assert kept == shapes
+
+
+def test_prune_deletes_events_one_microsecond_before_cutoff_in_either_shape(tmp_path):
+    before = ["2026-07-18T11:59:59.999999+00:00", "2026-07-18T11:59:59+00:00"]
+    result, kept = _boundary_prune(tmp_path, before + ["2026-07-18T12:00:00.000001+00:00"], before[0])
+    assert result["events_deleted"] == 2 and result["event_log_removed"] == 1
+    assert kept == ["2026-07-18T12:00:00.000001+00:00"]

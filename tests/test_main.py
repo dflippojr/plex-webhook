@@ -25,6 +25,21 @@ def test_webhook_valid_payload_records_and_dispatches(client, light_calls):
     assert light_calls == [("dim", ["AA:BB"])]
 
 
+def test_webhook_received_at_always_has_microseconds(client, monkeypatch):
+    import app.main as main
+
+    class WholeSecond(main.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 18, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", WholeSecond)
+    assert post(client, payload("media.play")).status_code == 200
+    expected = "2026-07-18T12:00:00.000000+00:00"
+    assert json.loads(client.log.read_text().splitlines()[0])["received_at"] == expected
+    assert client.conn.execute("SELECT received_at FROM events").fetchall() == [(expected,)]
+
+
 def test_webhook_invalid_json_still_200_and_recorded(client, light_calls):
     resp = client.post("/webhook", data={"payload": "{not json"})
     assert resp.status_code == 200
