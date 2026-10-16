@@ -528,7 +528,7 @@ def _dim(room_key, room_lights, settings, context, action_id):
 
 def _restore(room_key, room_lights, settings, context, action_id):
     """Put each recorded light back unless it was off, or changed by hand while dimmed."""
-    results, targets, levels = [], [], {}
+    results, targets, levels, cleared = [], [], {}, []
     lights.prepare(room_lights)
     for light in room_lights:
         light_id = _text(light.get("id"))
@@ -550,7 +550,7 @@ def _restore(room_key, room_lights, settings, context, action_id):
                 decision, reason = "skipped_manual_change", "brightness_changed"
             else:
                 decision, reason = "restored", "within_tolerance"
-        db.delete_restore_record(room_key, light_id)
+        cleared.append(light_id)
         _decide(context, room_key, light, "restore", action_id, decision, reason, {**settings, "dim": dim},
                 restore, observed)
         if decision in ("restored", "restore_without_read"):
@@ -559,6 +559,9 @@ def _restore(room_key, room_lights, settings, context, action_id):
         else:
             results.append(_skipped(light, "light_off" if record["was_off"] else "manual_change"))
     applied = lights.apply_action("restore", targets, levels) if targets else []
+    # Clear records only after the commands: a failure earlier in the loop keeps every record for a retry.
+    for light_id in cleared:
+        db.delete_restore_record(room_key, light_id)
     return results + applied if isinstance(applied, list) else None
 
 
