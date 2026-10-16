@@ -1,5 +1,6 @@
 """GET /rooms/{room}/lights: a read-only admin check of a room's lights, with fake transports only."""
 import json
+import logging
 import threading
 
 import pytest
@@ -252,3 +253,31 @@ def test_full_queue_drops_the_check_not_a_queued_action(den, monkeypatch, blocke
     assert ran == ["dim"]
     [record] = check_records(den)
     assert (record["outcome"], record["reason_code"]) == ("failed", "queue_overflow")
+
+
+def dropped_actions(reason):
+    return REGISTRY.get_sample_value("plex_dispatcher_actions_dropped_total", {"room": ROOM, "reason": reason}) or 0
+
+
+def test_refused_check_is_not_counted_or_logged_as_a_dropped_action(den, monkeypatch, blocked_worker, caplog):
+    monkeypatch.setattr(dispatcher._action_executor, "limit", 1)
+    before = dropped_actions("queue_overflow")
+    queued = dispatcher._action_executor.submit(lambda: None, key=("room", "hall"))
+    with caplog.at_level(logging.WARNING, logger="plex-webhook"):
+        future = dispatcher.check_lights(ROOM)
+    with pytest.raises(dispatcher.CheckDropped):
+        future.result(timeout=1)
+    monkeypatch.setattr(dispatcher._action_executor, "limit", dispatcher.ACTION_QUEUE_LIMIT)
+    assert not queued.cancelled()
+    assert dropped_actions("queue_overflow") == before
+    assert not any("dispatch_queue_overflow" in record.getMessage() for record in caplog.records)
+
+
+def test_superseded_check_is_not_counted_as_a_dropped_action(den, blocked_worker):
+    before = dropped_actions("superseded")
+    first, second = dispatcher.check_lights(ROOM), dispatcher.check_lights(ROOM)
+    with pytest.raises(dispatcher.CheckDropped):
+        first.result(timeout=1)
+    assert dropped_actions("superseded") == before
+    blocked_worker.set()
+    assert len(second.result(timeout=10)) == len(LIGHTS)

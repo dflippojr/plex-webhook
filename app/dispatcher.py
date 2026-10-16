@@ -351,7 +351,7 @@ def check_lights(room_key: str) -> Future:
                 result.set_exception(exc)
 
     def on_drop(reason):
-        _dropped(room_key, reason)
+        # Not _dropped: no light action was lost, and the caller audits the refusal.
         if result.set_running_or_notify_cancel():
             result.set_exception(CheckDropped(reason))
 
