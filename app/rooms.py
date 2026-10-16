@@ -244,6 +244,16 @@ def _validate(data):
 EMPTY_STATE = ({}, {}, {}, [], _validate_options({}))
 
 
+def _resolve(state, uuid, title) -> str | None:
+    """The room a player uuid or title selects in one published state: uuid first, then title."""
+    _, uuid_index, title_index, _, _ = state
+    if uuid and uuid in uuid_index:
+        return uuid_index[uuid]
+    if title:
+        return title_index.get(title.strip().lower())
+    return None
+
+
 class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
@@ -283,21 +293,20 @@ class RoomRegistry:
         logger.info("loaded %d room(s)", len(self.rooms))
 
     def resolve_room(self, payload: dict) -> str | None:
-        _, uuid_index, title_index, _, _ = self._state
         player = (payload or {}).get("Player") or {}
-        uuid = player.get("uuid")
-        title = player.get("title")
-        if uuid and uuid in uuid_index:
-            return uuid_index[uuid]
-        if title:
-            return title_index.get(title.strip().lower())
-        return None
+        return _resolve(self._state, player.get("uuid"), player.get("title"))
 
-    def player_label(self, title) -> str:
-        """The configured client title this player title matches (case-insensitive, like room matching), else 'other'."""
-        rooms, _, title_index, _, _ = self._state
-        room = title_index.get(title.strip().lower()) if isinstance(title, str) else None
-        return rooms[room]["plex_clients"][0]["title"].strip() if room else "other"
+    def player_label(self, title, uuid=None) -> str | None:
+        """The room this player resolves to the way dispatch resolves it (uuid first, then title, case-insensitive).
+
+        Labelled with the room's configured client title, or the room key when that client
+        has no title; None when the player matches no room.
+        """
+        state = self._state  # one snapshot, so a concurrent reload cannot drop the resolved room
+        room = _resolve(state, uuid if isinstance(uuid, str) else None, title if isinstance(title, str) else None)
+        if room is None:
+            return None
+        return (state[0][room]["plex_clients"][0].get("title") or "").strip() or room
 
     def playback_idle_seconds(self) -> int:
         return self._state[4]["playback_idle_minutes"] * 60

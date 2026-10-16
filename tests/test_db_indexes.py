@@ -114,14 +114,64 @@ def test_labeled_counts_fold_many_distinct_values_on_the_covering_index(tmp_path
         )
         conn.commit()
 
-        def label(event, player, account):
+        def label(event, player, uuid, account):
             return ("other", "other", "other" if account == "unknown" else "known")
 
         assert db.labeled_event_counts(conn, label) == {("other", "other", "known"): 10000,
                                                         ("other", "other", "other"): 10000}
         plan = query_plan(conn, lambda c: db.labeled_event_counts(c, label))
-        assert any("COVERING INDEX idx_events_labels_cover" in step for step in plan), plan
+        assert any("COVERING INDEX idx_events_player_labels_cover" in step for step in plan), plan
         assert not any("TEMP B-TREE" in step for step in plan), plan
+    finally:
+        conn.close()
+
+
+def test_labeled_counts_see_the_player_uuid_on_the_covering_index(tmp_path):
+    conn = sqlite3.connect(tmp_path / "uuid.db")
+    try:
+        conn.executescript(db.SCHEMA)
+        conn.executemany(
+            "INSERT INTO events (received_at,event,player_title,player_uuid,account_title,raw_payload) "
+            "VALUES (?,?,?,?,?,?)",
+            [("2026-10-01", "media.play", "Old TV", "stable", "alice", "{}"),
+             ("2026-10-02", "media.play", "Renamed TV", "stable", "alice", "{}"),
+             ("2026-10-03", "media.play", "Renamed TV", None, "alice", "{}"),
+             ("2026-10-04", "media.play", None, "stable", None, "{}")],
+        )
+        conn.commit()
+        groups = []
+
+        def label(event, player, uuid, account):
+            groups.append((event, player, uuid, account))
+            return (event, "room" if uuid == "stable" else "other", account)
+
+        assert db.labeled_event_counts(conn, label) == {("media.play", "room", "alice"): 2,
+                                                        ("media.play", "other", "alice"): 1,
+                                                        ("media.play", "room", "unknown"): 1}
+        assert sorted(groups) == sorted([("media.play", "Old TV", "stable", "alice"),
+                                         ("media.play", "Renamed TV", "stable", "alice"),
+                                         ("media.play", "Renamed TV", "unknown", "alice"),
+                                         ("media.play", "unknown", "stable", "unknown")])
+        plan = query_plan(conn, lambda c: db.labeled_event_counts(c, label))
+        assert any("COVERING INDEX idx_events_player_labels_cover" in step for step in plan), plan
+        assert not any("TEMP B-TREE" in step for step in plan), plan
+    finally:
+        conn.close()
+
+
+def test_title_only_label_index_from_earlier_releases_is_replaced(tmp_path, monkeypatch):
+    path = tmp_path / "title-index.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    conn = sqlite3.connect(path)
+    conn.executescript(db.SCHEMA)
+    conn.execute("DROP INDEX idx_events_player_labels_cover")
+    conn.execute("CREATE INDEX idx_events_labels_cover ON events(event, player_title, account_title)")
+    conn.close()
+    conn = db.get_connection()
+    try:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(events)")}
+        assert "idx_events_labels_cover" not in indexes
+        assert "idx_events_player_labels_cover" in indexes
     finally:
         conn.close()
 
@@ -139,6 +189,6 @@ def test_expression_index_from_earlier_releases_is_replaced(tmp_path, monkeypatc
     try:
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(events)")}
         assert "idx_events_counts_cover" not in indexes
-        assert "idx_events_labels_cover" in indexes
+        assert "idx_events_player_labels_cover" in indexes
     finally:
         conn.close()

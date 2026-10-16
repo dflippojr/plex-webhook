@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from prometheus_client import REGISTRY
 
-from conftest import drain, payload, post, rows
+from conftest import ROOMS_YAML, drain, payload, post, rows
 
 
 def test_health(client):
@@ -69,11 +69,54 @@ def test_webhook_increments_metrics(client):
 def test_event_labels_map_unknown_values_to_other(registry):
     import app.main as main
 
-    assert main._event_labels("media.play", " BEDROOM apple tv", "dan") == ("media.play", "Bedroom Apple TV", "known")
-    assert main._event_labels("media.bogus", "Stranger TV", "unknown") == ("other", "other", "other")
-    assert main._event_labels("unknown", "unknown", "unknown") == ("unknown", "unknown", "other")
-    labels = {main._event_labels(f"evt.{i}", f"Player {i}", f"user{i}") for i in range(1000)}
+    assert main._event_labels("media.play", " BEDROOM apple tv", "unknown", "dan") == (
+        "media.play", "Bedroom Apple TV", "known")
+    assert main._event_labels("media.bogus", "Stranger TV", "unknown", "unknown") == ("other", "other", "other")
+    assert main._event_labels("unknown", "unknown", "unknown", "unknown") == ("unknown", "unknown", "other")
+    # Resolved like dispatch: uuid first, so a renamed or untitled player keeps its room's label.
+    assert main._event_labels("media.play", "Renamed TV", "uuid-living", "dan")[1] == "Living Room TV"
+    assert main._event_labels("media.play", "unknown", "uuid-bed-tv", "dan")[1] == "Bedroom Apple TV"
+    assert main._event_labels("media.play", "unknown", "uuid-stranger", "dan")[1] == "unknown"
+    labels = {main._event_labels(f"evt.{i}", f"Player {i}", f"uuid-{i}", f"user{i}") for i in range(1000)}
     assert labels == {("other", "other", "known")}
+
+
+NULL_TITLE = ROOMS_YAML.replace("      - title: Living Room TV\n        uuid: uuid-living\n",
+                                "      - title: null\n        uuid: uuid-living\n")
+
+
+def _total(event, player, account):
+    return REGISTRY.get_sample_value("plex_webhook_events_total",
+                                     {"event": event, "player": player, "account": account}) or 0
+
+
+def test_uuid_match_with_new_title_counts_under_its_room(client, light_calls):
+    import app.main as main
+
+    other, known = _total("media.play", "other", "known"), _total("media.play", "Living Room TV", "known")
+    assert post(client, payload("media.play", title="Renamed TV", uuid="uuid-living")).status_code == 200
+    drain()
+    assert light_calls == [("dim", ["AA:BB"])]
+    assert _total("media.play", "Living Room TV", "known") == known + 1
+    assert _total("media.play", "other", "known") == other
+    reseeded = main.labeled_event_counts(client.conn, main._event_labels)
+    assert reseeded == {("media.play", "Living Room TV", "known"): 1}
+
+
+def test_null_title_client_counts_under_the_room_key(client, rooms_file, light_calls):
+    import app.main as main
+
+    assert NULL_TITLE != ROOMS_YAML
+    rooms_file.write_text(NULL_TITLE, encoding="utf-8")
+    assert client.post("/rooms/reload").status_code == 200
+    other, room = _total("media.play", "other", "known"), _total("media.play", "living_room", "known")
+    assert post(client, payload("media.play", title="Living Room TV", uuid="uuid-living")).status_code == 200
+    drain()
+    assert light_calls == [("dim", ["AA:BB"])]
+    assert _total("media.play", "living_room", "known") == room + 1
+    assert _total("media.play", "other", "known") == other
+    reseeded = main.labeled_event_counts(client.conn, main._event_labels)
+    assert reseeded == {("media.play", "living_room", "known"): 1}
 
 
 def test_webhook_labels_stay_bounded_for_many_distinct_values(client):
@@ -88,7 +131,9 @@ def test_webhook_labels_stay_bounded_for_many_distinct_values(client):
     assert not any("synthetic" in value.lower() for labels in series for value in labels)
     event_values = main.PLEX_EVENTS | {"other", "unknown"}
     assert {labels[0] for labels in series} <= event_values
-    assert {labels[1] for labels in series} <= {"Living Room TV", "Bedroom Apple TV", "other", "unknown"}
+    # Room keys appear when a test configures a client without a title.
+    rooms = {"Living Room TV", "Bedroom Apple TV", "living_room", "bedroom"}
+    assert {labels[1] for labels in series} <= rooms | {"other", "unknown"}
     assert {labels[2] for labels in series} <= {"known", "other"}
     assert ("other", "other", "known") in series
     assert ("unknown", "unknown", "other") in series
@@ -213,6 +258,9 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
     for event in ("media.play", "media.play", "media.stop"):
         app.db.insert_event(conn, "2024-05-01T12:00:00+00:00", event, payload(event, "Living Room TV"), "{}")
     app.db.insert_event(conn, "2024-05-01T11:00:00+00:00", "media.play", payload("media.play", "Seed TV"), "{}")
+    # Renamed in Plex since rooms.yaml was written: re-seeded under its room, like live counting.
+    app.db.insert_event(conn, "2024-05-01T10:00:00+00:00", "media.play",
+                        payload("media.play", "Renamed TV", uuid="uuid-living"), "{}")
     # Many distinct synthetic values collapse into a handful of series.
     conn.executemany(
         "INSERT INTO events (received_at, event, player_title, account_title, raw_payload) VALUES (?,?,?,?,?)",
@@ -228,7 +276,7 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
     try:
         reloaded = importlib.reload(main)
         labels = {"player": "Living Room TV", "account": "known"}
-        assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.play", **labels}) == 2
+        assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.play", **labels}) == 3
         assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.stop", **labels}) == 1
         other_player = {"event": "media.play", "player": "other", "account": "known"}
         assert REGISTRY.get_sample_value("plex_webhook_events_total", other_player) == 1

@@ -71,14 +71,16 @@ PLEX_EVENTS = frozenset({
 })
 
 
-def _event_labels(event, player, account):
+def _event_labels(event, player, uuid, account):
     """(event, player, account) label values; inputs use "unknown" for a missing value.
 
-    Players map to the configured client title; accounts are "known" when a title was sent.
+    Players map to the room dispatch resolves them to (by uuid, then title), else
+    "other", or "unknown" when no title was sent; accounts are "known" when a title was sent.
     """
+    room = registry.player_label(None if player == "unknown" else player, None if uuid == "unknown" else uuid)
     return (
         event if event == "unknown" or event in PLEX_EVENTS else "other",
-        player if player == "unknown" else registry.player_label(player),
+        room or ("unknown" if player == "unknown" else "other"),
         "other" if account == "unknown" else "known",
     )
 
@@ -369,8 +371,9 @@ async def plex_webhook(request: Request):
                   reason_code=reason, correlation=correlation, event_id=event_id)
 
     account_title = ((payload or {}).get("Account") or {}).get("title") or "unknown"
-    player_title = ((payload or {}).get("Player") or {}).get("title") or "unknown"
-    EVENTS_TOTAL.labels(*_event_labels(event_type or "unknown", player_title, account_title)).inc()
+    player = (payload or {}).get("Player") or {}
+    player_title, player_uuid = player.get("title") or "unknown", player.get("uuid") or "unknown"
+    EVENTS_TOTAL.labels(*_event_labels(event_type or "unknown", player_title, player_uuid, account_title)).inc()
     LAST_EVENT_TIMESTAMP.set(time.time())
 
     if reason == "accepted":
