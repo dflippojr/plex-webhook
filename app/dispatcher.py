@@ -186,9 +186,23 @@ class AuditContext:
 
 
 def init_room_gauges():
-    """Export every configured room so dashboards see 0 after a restart, not a stale pre-restart value."""
-    for room_key in registry.rooms:
-        ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(_active_clients.get(room_key, ())))
+    """Export every configured room so dashboards see 0 after a restart, not a stale pre-restart value.
+
+    A reload also drops the series of rooms it removed or renamed, so they never show a phantom session.
+    """
+    with _state_lock:
+        rooms = registry.rooms
+        exported = {sample.labels["room"] for metric in ROOM_ACTIVE_SESSIONS.collect() for sample in metric.samples}
+        for room_key in exported - rooms.keys():
+            ROOM_ACTIVE_SESSIONS.remove(room_key)
+        for room_key in rooms:
+            ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(_active_clients.get(room_key, ())))
+
+
+def _set_room_gauge(room_key, active):
+    """Only configured rooms get a series; a room a reload removed keeps its players but not its gauge."""
+    if room_key in registry.rooms:
+        ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
 
 
 init_room_gauges()
@@ -235,7 +249,7 @@ def expire_idle_clients(context_factory: Callable | None = None):
             for client_id in stale:
                 del active[client_id]
             EXPIRED_PLAYERS_TOTAL.labels(room=room_key).inc(len(stale))
-            ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
+            _set_room_gauge(room_key, active)
             logger.info("room=%s reason=playback_expired players=%d", room_key, len(stale))
             if not active:
                 _pending_rooms.discard(room_key)
@@ -271,7 +285,7 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
             active.pop(client_id, None)
 
         is_active = len(active) > 0
-        ROOM_ACTIVE_SESSIONS.labels(room=room_key).set(len(active))
+        _set_room_gauge(room_key, active)
 
         if not was_active and is_active:
             _pending_rooms.add(room_key)

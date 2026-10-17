@@ -472,6 +472,8 @@ Dispatcher activity is also exported as Prometheus metrics
 (`plex_dispatcher_room_active_sessions`, `plex_dispatcher_actions_total`,
 `plex_dispatcher_light_decisions_total`, `plex_dispatcher_actions_dropped_total`,
 `plex_dispatcher_light_results_total`) and shown on the same Grafana dashboard.
+`plex_dispatcher_room_active_sessions` has a series only for configured rooms: a
+`POST /rooms/reload` that removes or renames a room drops its series (counters keep theirs).
 `plex_dispatcher_actions_total` counts dispatcher calls that completed; it is **not** a
 verified per-device success counter (a call where every light was skipped or failed still
 counts). Per-light results are in the [audit trail](docs/audit.md#light-actions) and are
