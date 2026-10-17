@@ -122,6 +122,28 @@ def test_manual_change_threshold_is_five_points_from_the_dim_level(world, hand, 
     assert world.fake.commands == ([("restore", "g1", 70)] if expected == "restored" else [])
 
 
+def test_restore_failing_mid_loop_keeps_every_record_and_sends_nothing(world, registry, monkeypatch):
+    world.fake.state = {"g1": on(80), "t1": on(70)}
+    world.play()
+    world.fake.commands.clear()
+    real = db.get_restore_record
+
+    def locked(room, light_id):  # an external writer holding the database lock past the busy timeout
+        if light_id == "t1":
+            raise sqlite3.OperationalError("database is locked")
+        return real(room, light_id)
+
+    monkeypatch.setattr(dispatcher.db, "get_restore_record", locked)
+    world.stop()
+    assert world.fake.commands == []
+    assert real(ROOM, "g1")["restore_percent"] == 80
+    assert real(ROOM, "t1")["restore_percent"] == 70
+    monkeypatch.setattr(dispatcher.db, "get_restore_record", real)
+    dispatcher._apply(ROOM, "restore", None, world.context, None, registry.settings_for(ROOM))  # the retry
+    assert world.fake.commands == [("restore", "g1", 80), ("restore", "t1", 70)]
+    assert db.rooms_with_restore_records() == set()
+
+
 def test_light_turned_off_by_hand_is_skipped(world):
     world.fake.state = {"g1": on(70)}
     world.play()
