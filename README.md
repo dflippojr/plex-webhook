@@ -197,10 +197,14 @@ unauthenticated:
   `library.on.deck`, `library.new`, `admin.database.backup`,
   `admin.database.corrupted`, `device.new`, `playback.started`), else `other`;
   `unknown` when the payload has none.
-- `player`: the `title` of the matching `plex_clients` entry in `rooms.yaml`
-  (case-insensitive, as configured), else `other`; `unknown` when absent. A
-  rename in `rooms.yaml` takes effect for new events on reload and for history
-  on the next restart.
+- `player`: the room the event resolves to, matched the way dispatch matches
+  it (`Player.uuid` first, then `Player.title`, case-insensitive), exported as
+  that room's configured `plex_clients` `title` (as configured), or as the room
+  key (for example `living_room`) when that entry has `title: null`. So a player
+  renamed in Plex still counts under its room while its uuid matches. Anything
+  else is `other`, or `unknown` when the payload sends no player title. A rename
+  in `rooms.yaml` takes effect for new events on reload and for history on the
+  next restart.
 - `account`: `known` when Plex sent an account title, else `other`. Account names
   are not exported.
 
@@ -208,12 +212,14 @@ On startup the counters are re-seeded from SQLite with the same mapping, so the
 series count stays bounded however many distinct values are stored.
 
 On first open, existing databases automatically gain two indexes for counter
-seeding and client discovery (and drop the expression index earlier releases used
-for seeding). Index creation adds startup work once; subsequent opens reuse them,
-and all existing event history is retained. These queries still scale with
-history, but the counter re-seed reads only the covering index and holds one
-entry per label set. On a synthetic 100,000-event Windows fixture, the indexes
-added 7,442,432 bytes (5.21%) and first open took about 295 ms. Maintaining them
+seeding and client discovery (and drop the seeding indexes earlier releases used:
+an expression index, and a title-only index without `player_uuid`, so upgrading
+rebuilds the seeding index once). Index creation adds startup work once;
+subsequent opens reuse them, and all existing event history is retained. These
+queries still scale with history, but the counter re-seed groups by event,
+player title, player uuid and account, reads only the covering index and holds
+one entry per label set. On a synthetic 100,000-event Windows fixture, the
+indexes added 8,069,120 bytes (5.65%) and first open took about 294 ms. Maintaining them
 also adds write work to each insert, within disk/cache variance on that fixture.
 
 Reproduce read medians (one warmup, seven trials), query plans, database sizes,
