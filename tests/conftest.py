@@ -160,6 +160,14 @@ def client(tmp_path, monkeypatch, registry, light_calls):
         c.conn, c.log = conn, tmp_path / "events.jsonl"
         yield c
     conn.close()
+    # Every events.jsonl line must be standard JSON (no NaN/Infinity tokens).
+    if c.log.exists():
+        for line in c.log.read_text(encoding="utf-8").splitlines():
+            json.loads(line, parse_constant=_reject_constant)
+
+
+def _reject_constant(constant):
+    raise ValueError(f"non-standard JSON constant {constant}")
 
 
 def payload(event, title="Living Room TV", uuid=None, account="dan"):
