@@ -347,7 +347,7 @@ async def plex_webhook(request: Request):
     ]
 
     event_type = payload.get("event") if payload else None
-    received_at = datetime.now(timezone.utc).isoformat()
+    received_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
     record = {
         "received_at": received_at,

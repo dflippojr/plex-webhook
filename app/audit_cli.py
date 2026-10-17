@@ -127,6 +127,8 @@ def prune(conn, *, apply=False, now=None, events_log=None):
     Covers audit rows, legacy `events` rows and, when given, events.jsonl.
     """
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=90)).isoformat(timespec="microseconds")
+    # Legacy whole-second received_at ("...:00+00:00") sorts before the cutoff's ".000000" twin.
+    cutoff_second = cutoff[:19] + cutoff[26:]
     # Lock count+delete together only for the explicitly writable operation.
     if apply:
         conn.execute("BEGIN IMMEDIATE")
@@ -134,11 +136,12 @@ def prune(conn, *, apply=False, now=None, events_log=None):
         count = conn.execute("SELECT COUNT(*) FROM audit_events WHERE recorded_at < ?", (cutoff,)).fetchone()[0]
         events = 0
         if _has_table(conn, "events"):
-            events = conn.execute("SELECT COUNT(*) FROM events WHERE received_at < ?", (cutoff,)).fetchone()[0]
+            events = conn.execute("SELECT COUNT(*) FROM events WHERE received_at < ? AND received_at != ?",
+                                  (cutoff, cutoff_second)).fetchone()[0]
         if apply:
             conn.execute("DELETE FROM audit_events WHERE recorded_at < ?", (cutoff,))
             if _has_table(conn, "events"):
-                conn.execute("DELETE FROM events WHERE received_at < ?", (cutoff,))
+                conn.execute("DELETE FROM events WHERE received_at < ? AND received_at != ?", (cutoff, cutoff_second))
     log_eligible, _ = prune_event_log(events_log, cutoff, apply=apply) if events_log else (0, 0)
     return {"cutoff": cutoff, "eligible": count, "deleted": count if apply else 0, "dry_run": not apply,
             "events_eligible": events, "events_deleted": events if apply else 0,
