@@ -546,6 +546,31 @@ def test_unstorable_value_in_each_stored_field_is_invalid_payload(client, light_
     assert light_calls == []
 
 
+@pytest.mark.parametrize("group,name,value,outcome", [
+    ("Account", "title", 7, "invalid_payload"),
+    ("Account", "title", True, "invalid_payload"),
+    ("Player", "title", 1.5, "invalid_payload"),
+    ("Player", "uuid", ["x"], "invalid_payload"),
+    ("Metadata", "type", {"a": 1}, "invalid_payload"),
+    ("Metadata", "grandparentTitle", ["x"], "invalid_payload"),
+    ("Metadata", "ratingKey", True, "accepted"),
+    ("Metadata", "title", 1.5, "accepted"),
+    ("Metadata", "duration", ["x"], "accepted"),
+])
+def test_stored_field_type_rules(client, group, name, value, outcome):
+    body = payload("library.new")
+    body[group][name] = value
+    assert post(client, body).status_code == 200
+    assert [r["reason_code"] for r in rows(client)] == [outcome]
+
+
+def test_unstorable_cases_cover_every_stored_field():
+    from app.db import STORED_FIELDS
+
+    assert {(group, name) for group, name, _ in UNSTORABLE_FIELDS} == {
+        (group, name) for group, names in STORED_FIELDS for name in names}
+
+
 def test_each_stored_field_lands_in_its_column(client):
     body = {"event": "media.scrobble", "Account": {"title": "acct"}, "Player": {"title": "player", "uuid": "uuid-1"},
             "Metadata": {"type": "episode", "title": "Pilot", "grandparentTitle": "Show", "ratingKey": 7}}

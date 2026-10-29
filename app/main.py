@@ -15,7 +15,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import audit, auth, dispatcher
-from app.db import get_connection, insert_event, labeled_event_counts, last_received_at, list_known_clients
+from app.db import (STORED_FIELDS, get_connection, insert_event, labeled_event_counts, last_received_at,
+                    list_known_clients, stored_values)
 from app.envutil import _env_int
 from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
@@ -291,8 +292,7 @@ async def plex_webhook(request: Request):
     declared = request.headers.get("content-length")
     if declared is not None:
         if not declared.isdigit():
-            _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
-            raise HTTPException(status_code=400, detail="Invalid webhook form")
+            _reject_invalid_form(correlation)
         if int(declared) > MAX_BODY_BYTES:
             _reject_oversized("body_too_large")
     _limit_streamed_body(request)
@@ -309,11 +309,9 @@ async def plex_webhook(request: Request):
             _reject_oversized("too_many_fields")
         if detail.startswith(("Part exceeded", "Field exceeded")):
             _reject_oversized("field_too_large")
-        _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
-        raise HTTPException(status_code=400, detail="Invalid webhook form") from None
+        _reject_invalid_form(correlation)
     except Exception:
-        _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
-        raise HTTPException(status_code=400, detail="Invalid webhook form") from None
+        _reject_invalid_form(correlation)
 
     payload = None
     decoded_payload = None
@@ -381,6 +379,12 @@ async def plex_webhook(request: Request):
     return {"status": "received", "event": event_type}
 
 
+def _reject_invalid_form(correlation):
+    """400 for a body that is not a readable form. The receipt is audited; nothing is stored."""
+    _record_audit(action="webhook.receipt", outcome="rejected", reason_code="invalid_form", correlation=correlation)
+    raise HTTPException(status_code=400, detail="Invalid webhook form") from None
+
+
 def _reject_oversized(reason):
     """413 for a request over the bounds. Nothing is stored; the metric counts it."""
     WEBHOOK_REJECTED_TOTAL.labels(reason=reason).inc()
@@ -416,27 +420,14 @@ def _valid_payload(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("event"), str):
         return False
     # Reject shapes that would otherwise raise during raw capture/dispatch.
-    for group, names in (("Account", ("title",)), ("Player", ("uuid", "title")), ("Metadata", ())):
+    for group, names in STORED_FIELDS:
         fields = payload.get(group)
         if fields is not None and not isinstance(fields, dict):
             return False
-        if fields and any(fields.get(name) is not None and not isinstance(fields[name], str) for name in names):
+        allowed = (str, int, float) if group == "Metadata" else str
+        if fields and any(fields.get(name) is not None and not isinstance(fields[name], allowed) for name in names):
             return False
-    metadata = payload.get("Metadata") or {}
-    for name in ("type", "title", "grandparentTitle", "ratingKey"):
-        if metadata.get(name) is not None and not isinstance(metadata[name], (str, int, float)):
-            return False
-    return all(_storable(value) for value in _stored_values(payload))
-
-
-def _stored_values(payload):
-    """The payload values insert_event binds to SQLite."""
-    yield payload["event"]
-    for group, names in (("Account", ("title",)), ("Player", ("uuid", "title")),
-                         ("Metadata", ("type", "title", "grandparentTitle", "ratingKey"))):
-        fields = payload.get(group) or {}
-        for name in names:
-            yield fields.get(name)
+    return all(_storable(value) for value in (payload["event"], *stored_values(payload)))
 
 
 def _storable(value):
