@@ -443,6 +443,51 @@ def test_devstatus_with_only_a_malformed_datagram_fails_and_drops_the_discovered
     assert lights._govee_addresses == {}
 
 
+def test_devstatus_ignores_a_reply_from_another_source_ip(lan, monkeypatch, secrets):
+    class CrossTalkSocket(LanSocket):
+        def sendto(self, data, addr):
+            if json.loads(data.decode())["msg"]["cmd"] == "devStatus":
+                self.inbox.append((json.dumps(on_at(10)).encode(), "192.168.1.77"))
+            super().sendto(data, addr)
+
+    monkeypatch.setattr(lights.socket, "socket", CrossTalkSocket)
+    secrets[GOVEE["id"]] = {"ip": "192.168.1.9"}
+    lan.status = {"192.168.1.9": on_at(40)}
+    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 40, transport="lan")
+    lan.status = {}
+    assert lights.read_state(GOVEE) == lights.StateReading.failed()
+
+
+def test_devstatus_ignores_a_reply_with_another_cmd(lan, garbled_lan, secrets):
+    secrets[GOVEE["id"]] = {"ip": "192.168.1.9"}
+    other = json.dumps({"msg": {"cmd": "scan", "data": {"onOff": 1, "brightness": 10}}}).encode()
+    garbled_lan.garbled = {"192.168.1.9": [other]}
+    lan.status = {"192.168.1.9": on_at(40)}
+    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 40, transport="lan")
+    lan.status = {}
+    assert lights.read_state(GOVEE) == lights.StateReading.failed()
+
+
+def test_devstatus_send_oserror_is_a_failed_lan_read(fake_socket, secrets, caplog):
+    secrets[GOVEE["id"]] = {"ip": "192.168.1.9"}
+    fake_socket.fail_send = True
+    with caplog.at_level(logging.INFO, logger="plex-webhook"):
+        assert lights.read_state(GOVEE) == lights.StateReading.failed()
+    assert "reason=state_read_failed brand=govee operation=read_state id=AA:BB" in caplog.text
+    assert "reason=discovery_failed" not in caplog.text
+    assert fake_socket.instances and all(s.closed for s in fake_socket.instances)
+
+
+def test_discovery_send_oserror_returns_nothing_and_logs(fake_socket, caplog):
+    fake_socket.fail_send = True
+    fake_socket.replies = [scan_reply("AA:BB", "10.0.0.9")]
+    with caplog.at_level(logging.INFO, logger="plex-webhook"):
+        assert lights.GoveeController()._discover_ips(["AA:BB", "CC:DD"]) == {}
+    assert ("reason=discovery_failed brand=govee operation=lan_discovery devices=2 fallback=cloud"
+            in caplog.text)
+    assert fake_socket.instances and all(s.closed for s in fake_socket.instances)
+
+
 def test_batch_scan_matches_each_reply_to_its_own_device(fake_socket):
     fake_socket.replies = [scan_reply("G1", "10.0.0.9"), scan_reply("OTHER", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
     assert lights.GoveeController()._discover_ips(["G0", "G1", "G2"]) == {"G0": "10.0.0.9", "G1": "10.0.0.9"}
