@@ -197,6 +197,59 @@ def diagnostic_action(action: str) -> str:
     return action if action in ("dim", "restore") else "unknown"
 
 
+# --- shared controller loops ----------------------------------------------
+
+
+def _guarded_apply(brand: str, apply, action: str, light: dict, brightness, turn_on: bool) -> LightResult:
+    """Run a controller's ``_apply``; a non-result or an exception becomes a fallback result."""
+    try:
+        result = apply(action, light, brightness, turn_on)
+        if isinstance(result, LightResult):
+            return result
+        return _fallback_result(brand, light, "unconfirmed", "result_unconfirmed")
+    except Exception:
+        logger.warning(
+            "reason=unexpected_controller_error brand=%s operation=apply action=%s id=%s",
+            brand, diagnostic_action(action), light.get("id"),
+        )
+        return _fallback_result(brand, light, "failed", "unexpected_error")
+
+
+def _apply_steps(brand: str, steps, action: str, light: dict, brightness, turn_on: bool) -> LightResult:
+    """Try each ``(transport, step)`` in order until one ends the light's work."""
+    device_id = light.get("id")
+    name = light.get("name", device_id)
+    brightness = _level(action, brightness)
+
+    attempts = []
+    for transport, step in steps:
+        attempt = _attempt_of(step(light, brightness, turn_on), transport)
+        attempts.append(attempt)
+        if attempt:
+            logger.info("%s[%s]: %s -> %sbrightness=%d%% (%s)", brand, transport, name,
+                        "on, " if turn_on else "", brightness, device_id)
+            return _result(brand, light, attempts)
+
+    logger.warning(
+        "reason=control_unavailable brand=%s operation=apply id=%s fallback=exhausted (could not control light)",
+        brand, device_id,
+    )
+    return _result(brand, light, attempts)
+
+
+def _read_steps(brand: str, steps, light: dict, timeout: float) -> StateReading:
+    """The first ok reading from ``(transport, step)`` pairs, tagged with its transport. Never raises."""
+    for transport, step in steps:
+        try:
+            reading = step(light, timeout)
+        except Exception:
+            logger.info("reason=state_read_failed brand=%s operation=read_state id=%s", brand, light.get("id"))
+            continue
+        if reading.ok:
+            return replace(reading, transport=transport)
+    return StateReading.failed()
+
+
 def _load_secrets() -> dict:
     """Load config/devices.secrets.yaml, cached after first read.
 
@@ -306,51 +359,17 @@ class GoveeController:
         return ip, "discovery" if ip else "none"
 
     def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
-        try:
-            result = self._apply(action, light, brightness, turn_on)
-            if isinstance(result, LightResult):
-                return result
-            return _fallback_result("govee", light, "unconfirmed", "result_unconfirmed")
-        except Exception:
-            logger.warning(
-                "reason=unexpected_controller_error brand=govee operation=apply action=%s id=%s",
-                diagnostic_action(action), light.get("id"),
-            )
-            return _fallback_result("govee", light, "failed", "unexpected_error")
+        return _guarded_apply("govee", self._apply, action, light, brightness, turn_on)
 
     def _apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
-        device_id = light.get("id")
-        name = light.get("name", device_id)
-        brightness = _level(action, brightness)
-
-        attempts = []
-        for transport, step in (("lan", self._try_lan), ("cloud", self._try_cloud)):
-            attempt = _attempt_of(step(light, brightness, turn_on), transport)
-            attempts.append(attempt)
-            if attempt:
-                logger.info("govee[%s]: %s -> %sbrightness=%d%% (%s)", transport, name,
-                            "on, " if turn_on else "", brightness, device_id)
-                return _result("govee", light, attempts)
-
-        logger.warning(
-            "reason=control_unavailable brand=govee operation=apply id=%s fallback=exhausted (could not control light)",
-            device_id,
-        )
-        return _result("govee", light, attempts)
+        steps = (("lan", self._try_lan), ("cloud", self._try_cloud))
+        return _apply_steps("govee", steps, action, light, brightness, turn_on)
 
     # --- reading state ---
 
     def read_state(self, light: dict, timeout: float) -> StateReading:
         """LAN ``devStatus`` first, then the cloud state API. Never raises."""
-        for transport, step in (("lan", self._read_lan), ("cloud", self._read_cloud)):
-            try:
-                reading = step(light, timeout)
-            except Exception:
-                logger.info("reason=state_read_failed brand=govee operation=read_state id=%s", light.get("id"))
-                continue
-            if reading.ok:
-                return replace(reading, transport=transport)
-        return StateReading.failed()
+        return _read_steps("govee", (("lan", self._read_lan), ("cloud", self._read_cloud)), light, timeout)
 
     def _read_lan(self, light: dict, timeout: float) -> StateReading:
         device_id = light.get("id")
@@ -572,37 +591,11 @@ class TuyaController:
     """
 
     def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
-        try:
-            result = self._apply(action, light, brightness, turn_on)
-            if isinstance(result, LightResult):
-                return result
-            return _fallback_result("tuya", light, "unconfirmed", "result_unconfirmed")
-        except Exception:
-            logger.warning(
-                "reason=unexpected_controller_error brand=tuya operation=apply action=%s id=%s",
-                diagnostic_action(action), light.get("id"),
-            )
-            return _fallback_result("tuya", light, "failed", "unexpected_error")
+        return _guarded_apply("tuya", self._apply, action, light, brightness, turn_on)
 
     def _apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
-        device_id = light.get("id")
-        name = light.get("name", device_id)
-        brightness = _level(action, brightness)
-
-        attempts = []
-        for transport, step in (("local", self._try_local), ("cloud", self._try_cloud)):
-            attempt = _attempt_of(step(light, brightness, turn_on), transport)
-            attempts.append(attempt)
-            if attempt:
-                logger.info("tuya[%s]: %s -> %sbrightness=%d%% (%s)", transport, name,
-                            "on, " if turn_on else "", brightness, device_id)
-                return _result("tuya", light, attempts)
-
-        logger.warning(
-            "reason=control_unavailable brand=tuya operation=apply id=%s fallback=exhausted (could not control light)",
-            device_id,
-        )
-        return _result("tuya", light, attempts)
+        steps = (("local", self._try_local), ("cloud", self._try_cloud))
+        return _apply_steps("tuya", steps, action, light, brightness, turn_on)
 
     @staticmethod
     def _judge(response) -> str:
@@ -639,15 +632,7 @@ class TuyaController:
 
     def read_state(self, light: dict, timeout: float) -> StateReading:
         """Local ``status()`` first, then the Tuya cloud status API. Never raises."""
-        for transport, step in (("local", self._read_local), ("cloud", self._read_cloud)):
-            try:
-                reading = step(light, timeout)
-            except Exception:
-                logger.info("reason=state_read_failed brand=tuya operation=read_state id=%s", light.get("id"))
-                continue
-            if reading.ok:
-                return replace(reading, transport=transport)
-        return StateReading.failed()
+        return _read_steps("tuya", (("local", self._read_local), ("cloud", self._read_cloud)), light, timeout)
 
     def _read_local(self, light: dict, timeout: float) -> StateReading:
         secret = _device_secret(light.get("id"))
