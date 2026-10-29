@@ -304,7 +304,7 @@ def _static_ip(device_id) -> str | None:
     return _device_secret(device_id).get("ip") if isinstance(device_id, str) else None
 
 
-def _listen_socket():
+def _listen_socket() -> socket.socket:
     """A UDP socket bound to the Govee reply port; closed again if setup fails."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
