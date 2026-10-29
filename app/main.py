@@ -16,6 +16,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from app import audit, auth, dispatcher
 from app.db import get_connection, insert_event, labeled_event_counts, last_received_at, list_known_clients
+from app.envutil import _env_int
 from app.rooms import RoomConfigError, RoomConfigUnavailable, registry
 
 # How often stale plays are checked; see dispatcher.expire_idle_clients.
@@ -35,14 +36,6 @@ app = FastAPI(title="plex-webhook", lifespan=lifespan)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 EVENT_LOG = DATA_DIR / "events.jsonl"
-
-
-def _env_int(name, default):
-    try:
-        value = int(os.environ.get(name, default))
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 # Request bounds for the unauthenticated webhook, sized for a Plex delivery:
@@ -142,31 +135,36 @@ def _require_admin(request, action):
                         headers={"WWW-Authenticate": "Bearer"})
 
 
+def _audit_db_path():
+    return db_conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+def _audit_failed():
+    logger.warning("reason=audit_write_failed")
+    AUDIT_FAILURES_TOTAL.inc()
+
+
 def _record_audit(**fields):
     try:
-        path = db_conn.execute("PRAGMA database_list").fetchone()[2]
-        audit.append(path, **fields)
+        audit.append(_audit_db_path(), **fields)
     except Exception:
         # Fail open. Never expose exception strings or retry webhook/light work.
-        logger.warning("reason=audit_write_failed")
-        AUDIT_FAILURES_TOTAL.inc()
+        _audit_failed()
 
 
 def _light_audit_context(correlation, event_id, actor="plex_server"):
     """Bind the receipt to the worker. The path is resolved here; the worker opens its own connection."""
     try:
-        path = db_conn.execute("PRAGMA database_list").fetchone()[2]
+        path = _audit_db_path()
     except Exception:
-        logger.warning("reason=audit_write_failed")
-        AUDIT_FAILURES_TOTAL.inc()
+        _audit_failed()
         return None
 
     def record(**fields):
         try:
             audit.append(path, **fields)
         except Exception:
-            logger.warning("reason=audit_write_failed")
-            AUDIT_FAILURES_TOTAL.inc()
+            _audit_failed()
 
     return dispatcher.AuditContext(record, correlation, event_id, actor)
 
@@ -208,8 +206,8 @@ async def metrics():
 
 @app.get("/clients")
 async def clients(request: Request):
-    _require_admin(request, "clients.read")
     """Distinct Plex clients seen so far, to help fill in the local config/rooms.yaml."""
+    _require_admin(request, "clients.read")
     return {"clients": list_known_clients(db_conn)}
 
 
