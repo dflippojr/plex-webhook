@@ -392,10 +392,11 @@ class GoveeController:
                 if addr[0] != ip:
                     continue
                 try:
-                    message = json.loads(data.decode("utf-8")).get("msg") or {}
-                except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                    reply = json.loads(data.decode("utf-8"))
+                except (ValueError, RecursionError):
                     continue
-                if message.get("cmd") == "devStatus":
+                message = reply.get("msg") if isinstance(reply, dict) else None
+                if isinstance(message, dict) and message.get("cmd") == "devStatus":
                     return self._parse_lan_status(message.get("data"))
         finally:
             sock.close()

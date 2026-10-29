@@ -402,6 +402,47 @@ def test_one_scan_resolves_only_the_lights_that_need_it(lan, secrets, monkeypatc
     assert lights._govee_addresses["G2"][0] is None
 
 
+MALFORMED_DEVSTATUS = [
+    pytest.param(json.dumps({"msg": [1]}).encode(), id="msg-list"),
+    pytest.param(json.dumps({"msg": "x"}).encode(), id="msg-string"),
+    pytest.param(("[" * 100000 + "]" * 100000).encode(), id="too-deep"),
+]
+
+
+@pytest.fixture
+def garbled_lan(lan, monkeypatch):
+    """`lan`, but each devStatus is answered first by the datagrams in `garbled` (ip -> list of bytes)."""
+
+    class GarbledLanSocket(LanSocket):
+        garbled = {}
+
+        def sendto(self, data, addr):
+            if json.loads(data.decode())["msg"]["cmd"] == "devStatus":
+                self.inbox += [(datagram, addr[0]) for datagram in GarbledLanSocket.garbled.get(addr[0], [])]
+            super().sendto(data, addr)
+
+    monkeypatch.setattr(lights.socket, "socket", GarbledLanSocket)
+    return GarbledLanSocket
+
+
+@pytest.mark.parametrize("bad", MALFORMED_DEVSTATUS)
+def test_devstatus_skips_malformed_datagram_then_reads_valid_reply(lan, garbled_lan, secrets, bad):
+    secrets[GOVEE["id"]] = {"ip": "192.168.1.9"}
+    garbled_lan.garbled = {"192.168.1.9": [bad]}
+    lan.status = {"192.168.1.9": on_at(40)}
+    assert lights.read_state(GOVEE) == lights.StateReading(True, True, 40, transport="lan")
+
+
+@pytest.mark.parametrize("bad", MALFORMED_DEVSTATUS)
+def test_devstatus_with_only_a_malformed_datagram_fails_and_drops_the_discovered_address(lan, garbled_lan, bad):
+    lan.bulbs = {"G0": "10.0.0.1"}
+    garbled_lan.garbled = {"10.0.0.1": [bad]}
+    lights.prepare(ROOM[:1])
+    assert lights._govee_addresses["G0"][0] == "10.0.0.1"
+    assert lights.GoveeController()._read_lan(ROOM[0], 1.0) == lights.StateReading.failed()
+    assert lights._govee_addresses == {}
+
+
 def test_batch_scan_matches_each_reply_to_its_own_device(fake_socket):
     fake_socket.replies = [scan_reply("G1", "10.0.0.9"), scan_reply("OTHER", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
     assert lights.GoveeController()._discover_ips(["G0", "G1", "G2"]) == {"G0": "10.0.0.9", "G1": "10.0.0.9"}
