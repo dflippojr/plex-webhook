@@ -544,7 +544,11 @@ pip install --require-hashes --only-binary :all: -r requirements-dev.lock   # Py
 pytest --cov=app --cov-report=xml
 ```
 
-CI runs the same command on GitHub-hosted runners. The development lock is
+Coverage of `app/` below the floor (`fail_under` in `.coveragerc`) fails the
+run. `.github/workflows/ci.yml` runs the suite with that floor on
+GitHub-hosted runners and ends in one `gate` job, which fails unless every
+other CI job passed; require `gate` on `master`. Agent rules live in
+[`AGENTS.md`](AGENTS.md). The development lock is
 constrained by `requirements.lock`, so tests use the production dependency
 versions. After changing either requirements input or the base-image digest,
 run `./scripts/lock_requirements.sh` to regenerate both hash locks.
