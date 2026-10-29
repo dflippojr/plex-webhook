@@ -607,3 +607,18 @@ def test_tuya_cloud_brightness_only_sends_no_switch(monkeypatch):
     result = lights.TuyaController().apply("dim", TUYA, 30, turn_on=False)
     assert fake.log == [("cloud", "id"), ("cmd", "plug1", "bright_value_v2", 300)]
     assert (result.transport, result.progress) == ("cloud", ("brightness",))
+
+
+# --- default brightness levels (dim 20, restore 100 unless a valid level is given) -----
+
+
+@pytest.mark.parametrize("action,default", [("dim", 20), ("restore", 100)])
+@pytest.mark.parametrize("brightness", [None, 0, 101, True, "50"])
+def test_missing_or_invalid_brightness_uses_the_action_default(action, default, brightness):
+    assert lights._level(action, brightness) == default
+
+
+@pytest.mark.parametrize("action", ["dim", "restore"])
+@pytest.mark.parametrize("brightness", [1, 50, 100])
+def test_valid_brightness_is_kept(action, brightness):
+    assert lights._level(action, brightness) == brightness
