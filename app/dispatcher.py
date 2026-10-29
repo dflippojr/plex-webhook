@@ -1,7 +1,6 @@
 import copy
 import logging
 import math
-import os
 import threading
 import time
 from collections import Counter as OutcomeCounter, deque
@@ -12,6 +11,7 @@ from typing import Callable
 from prometheus_client import Counter, Gauge
 
 from app import audit, db, lights
+from app.envutil import _env_int
 from app.rooms import DEFAULT_DIM_PERCENT, DEFAULT_RESTORE_PERCENT, registry
 
 logger = logging.getLogger("plex-webhook")
@@ -58,15 +58,6 @@ LIGHT_OUTCOMES = set(audit.OPERATIONS["light.result"][3])
 
 # A light further than this many percentage points from the dim level was changed by hand.
 MANUAL_CHANGE_TOLERANCE_PERCENT = 5
-
-
-
-def _env_int(name, default):
-    try:
-        value = int(os.environ.get(name, default))
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 class ActionQueue:
