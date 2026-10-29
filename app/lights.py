@@ -43,12 +43,11 @@ from pathlib import Path
 
 import yaml
 
+from app.rooms import DEFAULT_DIM_PERCENT, DEFAULT_RESTORE_PERCENT
+
 logger = logging.getLogger("plex-webhook")
 
 # --- tunables -----------------------------------------------------------
-
-DIM_BRIGHTNESS_PERCENT = 20
-RESTORE_BRIGHTNESS_PERCENT = 100
 
 # Tuya data points. Unverified on real hardware (#4): override per light with
 # `switch_dp` / `brightness_dp` in rooms.yaml. The cloud API uses fixed codes instead.
@@ -147,15 +146,10 @@ def tuya_percent_to_raw(percent) -> int:
     return max(TUYA_RAW_MIN, min(TUYA_RAW_MAX, int(percent * 10)))
 
 
-def brightness_for(action: str):
-    """Default brightness percent an action commands; restore has no fixed level (it is read per light)."""
-    return DIM_BRIGHTNESS_PERCENT if action == "dim" else None
-
-
 def _level(action: str, brightness):
     if type(brightness) is int and 1 <= brightness <= 100:
         return brightness
-    return DIM_BRIGHTNESS_PERCENT if action == "dim" else RESTORE_BRIGHTNESS_PERCENT
+    return DEFAULT_DIM_PERCENT if action == "dim" else DEFAULT_RESTORE_PERCENT
 
 
 def _attempt_of(value, transport):
