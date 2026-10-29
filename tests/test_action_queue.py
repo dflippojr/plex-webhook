@@ -253,6 +253,11 @@ def test_queue_limit_comes_from_the_environment(monkeypatch):
         assert dispatcher._env_int("DISPATCH_QUEUE_LIMIT", 32) == 32
 
 
+def test_env_int_is_one_function_shared_by_main_and_dispatcher():
+    import app.main as main
+    assert main._env_int is dispatcher._env_int
+
+
 @pytest.mark.parametrize("reason", ["superseded", "queue_overflow", "own_playback_active", "owned_by_newer_source"])
 def test_skipped_summary_reasons_are_valid_audit_records(trail, reason):
     dispatcher._record(trail.context, "light.action_summary", "skipped", reason, "a", "dim", str(uuid.uuid4()),
