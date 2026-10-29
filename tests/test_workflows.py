@@ -19,15 +19,30 @@ def _jobs(path):
 WORKFLOW_FILES = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
 
 
-@pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
-def test_every_job_runs_on_a_github_hosted_runner(path):
-    for name, job in _jobs(path).items():
+def _runner_problems(workflow, jobs):
+    problems = []
+    for name, job in jobs.items():
         if "uses" in job:  # a reusable workflow; it names its own runners
             continue
         runs_on = job.get("runs-on")
-        assert isinstance(runs_on, str) and HOSTED.fullmatch(runs_on), (
-            f"{path.name}: job {name!r} runs on {runs_on!r}, not a GitHub-hosted runner"
-        )
+        if not (isinstance(runs_on, str) and HOSTED.fullmatch(runs_on)):
+            problems.append(f"{workflow}: job {name!r} runs on {runs_on!r}, not a GitHub-hosted runner")
+    return problems
+
+
+@pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
+def test_every_job_runs_on_a_github_hosted_runner(path):
+    assert _runner_problems(path.name, _jobs(path)) == []
+
+
+def test_a_job_calling_a_reusable_workflow_is_rejected():
+    # The called workflow is outside this repo, so its runners cannot be checked here.
+    jobs = {
+        "test": {"uses": "some-owner/some-repo/.github/workflows/test.yml@main"},
+        "gate": {"needs": ["test"], "if": "always()", "runs-on": "ubuntu-latest"},
+    }
+    problems = _runner_problems("ci.yml", jobs)
+    assert len(problems) == 1 and "'test'" in problems[0]
 
 
 def test_ci_gate_always_runs_and_needs_every_other_job():
