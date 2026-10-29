@@ -53,7 +53,9 @@ base-image digest, regenerate both locks with `./scripts/lock_requirements.sh`
   placeholder values.
 - CI runs only on GitHub-hosted runners. Never add a self-hosted runner to any
   workflow: on a public repo, a fork's pull request could run code on it.
-  `tests/test_workflows.py` fails when a job names any other runner.
+  `tests/test_workflows.py` fails when a job names any other runner, and when
+  a job calls a reusable workflow (job-level `uses:`), whose runners it cannot
+  check.
 
 ## Safety
 

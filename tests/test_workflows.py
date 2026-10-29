@@ -8,7 +8,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 # GitHub-hosted runner labels, such as ubuntu-latest, ubuntu-24.04, windows-2025 or macos-15.
-# Anything else (self-hosted, a custom label, a runner group or a matrix expression) fails.
+# Anything else (self-hosted, a custom label, a runner group or a matrix expression) fails,
+# and so does a job-level `uses:` that calls a reusable workflow.
 HOSTED = re.compile(r"(ubuntu|windows|macos)-(latest|\d+(\.\d+)?)(-arm|-arm64|-large|-xlarge)?")
 
 
@@ -22,7 +23,9 @@ WORKFLOW_FILES = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml
 def _runner_problems(workflow, jobs):
     problems = []
     for name, job in jobs.items():
-        if "uses" in job:  # a reusable workflow; it names its own runners
+        if "uses" in job:
+            # A reusable workflow picks its own runners outside this check, so it fails closed.
+            problems.append(f"{workflow}: job {name!r} calls reusable workflow {job['uses']!r}, whose runners are not checked")
             continue
         runs_on = job.get("runs-on")
         if not (isinstance(runs_on, str) and HOSTED.fullmatch(runs_on)):
