@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 from prometheus_client import REGISTRY
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from conftest import ROOMS_YAML, drain, payload, post, rows
 
@@ -454,6 +455,130 @@ def test_signed_64_bit_extremes_are_still_stored(client):
     body = {"event": "library.new", "Metadata": {"ratingKey": 2 ** 63 - 1, "title": -(2 ** 63)}}
     assert post(client, body).status_code == 200
     assert client.conn.execute("SELECT rating_key, title FROM events").fetchone() == (str(2 ** 63 - 1), str(-(2 ** 63)))
+
+def _webhook_metrics():
+    return {(sample.name, tuple(sorted(sample.labels.items()))): sample.value
+            for metric in REGISTRY.collect() for sample in metric.samples
+            if sample.name.startswith("plex_webhook_") and not sample.name.endswith("_created")}
+
+
+def _assert_invalid_form(client, send):
+    before = _webhook_metrics()
+    resp = send()
+    assert resp.status_code == 400
+    assert resp.json() == {"detail": "Invalid webhook form"}
+    assert resp.headers["content-type"] == "application/json"
+    assert _stored(client) == (0, False)
+    assert [(r["source"], r["action"], r["outcome"], r["reason_code"], r["changed_fields"]) for r in rows(client)] == [
+        ("webhook", "webhook.receipt", "rejected", "invalid_form", {})
+    ]
+    assert _webhook_metrics() == before
+
+
+@pytest.mark.parametrize("declared", ["abc", "-1", "1.5", "1e3"])
+def test_non_digit_content_length_is_invalid_form(client, declared):
+    _assert_invalid_form(client, lambda: client.post("/webhook", content=b"payload=x", headers={
+        "content-type": "application/x-www-form-urlencoded", "content-length": declared}))
+
+
+@pytest.mark.parametrize("content_type,body", [
+    ("multipart/form-data", b"payload=x"),
+    ("multipart/form-data; boundary=abc", b"not a multipart body"),
+    ("multipart/form-data; boundary=abc", b"--abc\r\nContent-Disposition: form-data\r\n\r\nx\r\n--abc--\r\n"),
+])
+def test_malformed_multipart_body_is_invalid_form(client, content_type, body):
+    _assert_invalid_form(client, lambda: client.post("/webhook", content=body, headers={"content-type": content_type}))
+
+
+@pytest.mark.parametrize("error", [
+    StarletteHTTPException(status_code=400, detail="Unparseable form"),
+    RuntimeError("parser failure"),
+])
+def test_form_parser_errors_are_invalid_form(client, monkeypatch, error):
+    from starlette.requests import Request
+
+    async def fail_form(self, **kwargs):
+        raise error
+
+    monkeypatch.setattr(Request, "form", fail_form)
+    _assert_invalid_form(client, lambda: post(client, payload("media.play")))
+
+
+# One hostile value for every payload field insert_event stores.
+UNSTORABLE_FIELDS = [
+    ("Account", "title", "\ud800"),
+    ("Player", "title", "\ud800"),
+    ("Player", "uuid", "\udfff"),
+    ("Metadata", "type", "\ud800"),
+    ("Metadata", "type", 2 ** 63),
+    ("Metadata", "title", "a\udfffb"),
+    ("Metadata", "title", -(2 ** 63) - 1),
+    ("Metadata", "grandparentTitle", "\ud800"),
+    ("Metadata", "grandparentTitle", 2 ** 64),
+    ("Metadata", "ratingKey", "\udfff"),
+    ("Metadata", "ratingKey", 2 ** 63),
+]
+
+
+@pytest.mark.parametrize("group,name,value", UNSTORABLE_FIELDS)
+def test_unstorable_value_in_each_stored_field_is_invalid_payload(client, light_calls, group, name, value):
+    body = payload("media.play")
+    body[group][name] = value
+    before = _webhook_metrics()
+    resp = client.post("/webhook", files={"payload": (None, json.dumps(body))})
+    assert (resp.status_code, resp.json()) == (200, {"status": "received", "event": None})
+    receipt = rows(client)
+    assert [(r["outcome"], r["reason_code"]) for r in receipt] == [("rejected", "invalid_payload")]
+    assert client.conn.execute(
+        "SELECT event, account_title, player_title, player_uuid, media_type, title, grandparent_title, rating_key, "
+        "raw_payload, raw_truncated FROM events").fetchall() == [
+        (None, None, None, None, None, None, None, None, json.dumps(body), 0)
+    ]
+    line = json.loads(client.log.read_text(encoding="utf-8"))
+    assert (line["event"], line["payload"]) == (None, json.loads(json.dumps(body)))
+    after = _webhook_metrics()
+    events = ("plex_webhook_events_total", (("account", "other"), ("event", "unknown"), ("player", "unknown")))
+    assert after.pop(events) == before.pop(events, 0) + 1
+    after.pop(("plex_webhook_last_event_timestamp_seconds", ()))
+    before.pop(("plex_webhook_last_event_timestamp_seconds", ()), None)
+    assert after == before
+    drain()
+    assert light_calls == []
+
+
+@pytest.mark.parametrize("group,name,value,outcome", [
+    ("Account", "title", 7, "invalid_payload"),
+    ("Account", "title", True, "invalid_payload"),
+    ("Player", "title", 1.5, "invalid_payload"),
+    ("Player", "uuid", ["x"], "invalid_payload"),
+    ("Metadata", "type", {"a": 1}, "invalid_payload"),
+    ("Metadata", "grandparentTitle", ["x"], "invalid_payload"),
+    ("Metadata", "ratingKey", True, "accepted"),
+    ("Metadata", "title", 1.5, "accepted"),
+    ("Metadata", "duration", ["x"], "accepted"),
+])
+def test_stored_field_type_rules(client, group, name, value, outcome):
+    body = payload("library.new")
+    body[group][name] = value
+    assert post(client, body).status_code == 200
+    assert [r["reason_code"] for r in rows(client)] == [outcome]
+
+
+def test_unstorable_cases_cover_every_stored_field():
+    from app.db import STORED_FIELDS
+
+    assert {(group, name) for group, name, _ in UNSTORABLE_FIELDS} == {
+        (group, name) for group, names in STORED_FIELDS for name in names}
+
+
+def test_each_stored_field_lands_in_its_column(client):
+    body = {"event": "media.scrobble", "Account": {"title": "acct"}, "Player": {"title": "player", "uuid": "uuid-1"},
+            "Metadata": {"type": "episode", "title": "Pilot", "grandparentTitle": "Show", "ratingKey": 7}}
+    assert post(client, body).status_code == 200
+    assert client.conn.execute(
+        "SELECT event, account_title, player_title, player_uuid, media_type, title, grandparent_title, rating_key "
+        "FROM events").fetchall() == [("media.scrobble", "acct", "player", "uuid-1", "episode", "Pilot", "Show", "7")]
+
 
 
 @pytest.mark.parametrize("metadata", ['"duration":1' + "0" * 400, '"duration":1000,"viewOffset":1' + "0" * 400])
