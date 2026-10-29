@@ -104,6 +104,39 @@ def test_locked_database_fail_open_reload(client, rooms_file, caplog):
     assert "reason=audit_write_failed" in caplog.text
 
 
+class _UnresolvablePathConnection:
+    """Stands in for main.db_conn when PRAGMA database_list itself fails."""
+
+    def execute(self, sql, *args):
+        raise sqlite3.OperationalError("SECRET")
+
+
+def test_audit_path_lookup_failure_fails_open_and_is_counted(monkeypatch, caplog):
+    import app.main as main
+    appended = []
+    monkeypatch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
+    monkeypatch.setattr(main, "db_conn", _UnresolvablePathConnection())
+    metric = "plex_webhook_audit_write_failures_total"
+    before = REGISTRY.get_sample_value(metric) or 0
+    main._record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation="c")
+    assert appended == []
+    assert REGISTRY.get_sample_value(metric) == before + 1
+    assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text
+
+
+def test_light_audit_context_path_lookup_failure_returns_no_context(monkeypatch, caplog):
+    import app.main as main
+    appended = []
+    monkeypatch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
+    monkeypatch.setattr(main, "db_conn", _UnresolvablePathConnection())
+    metric = "plex_webhook_audit_write_failures_total"
+    before = REGISTRY.get_sample_value(metric) or 0
+    assert main._light_audit_context("corr", 1) is None
+    assert appended == []
+    assert REGISTRY.get_sample_value(metric) == before + 1
+    assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text
+
+
 def test_bad_form_audited_safely(client, monkeypatch):
     from starlette.requests import Request
     async def fail_form(self):

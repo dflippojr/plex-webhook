@@ -166,6 +166,11 @@ def test_clients_lists_seen_players(client):
     assert clients[0]["event_count"] == 2
 
 
+def test_clients_route_docstring_is_the_description():
+    import app.main as main
+    assert main.clients.__doc__ == "Distinct Plex clients seen so far, to help fill in the local config/rooms.yaml."
+
+
 def test_rooms_and_reload(client, rooms_file):
     assert set(client.get("/rooms").json()["rooms"]) == {"living_room", "bedroom"}
     rooms_file.write_text("rooms:\n  den:\n    plex_clients: [{title: x}]\n    lights: []\n", encoding="utf-8")
