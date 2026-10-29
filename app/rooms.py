@@ -1,6 +1,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -13,6 +14,16 @@ DEFAULT_RESTORE_PERCENT = 100
 # A play with no matching pause/stop and no usable media duration stops counting after this long.
 DEFAULT_PLAYBACK_IDLE_MINUTES = 6 * 60
 MAX_PLAYBACK_IDLE_MINUTES = 7 * 24 * 60
+
+
+class RoomState(NamedTuple):
+    """One validated configuration, published as a single reference."""
+
+    rooms: dict
+    uuid_index: dict
+    title_index: dict
+    automations: list
+    options: dict
 
 
 class RoomConfigError(ValueError):
@@ -238,19 +249,18 @@ def _validate(data):
             light_origins[light_id] = f"{light_path}.id"
         if len(clients) != 1:
             raise RoomConfigError([{"path": f"{path}.plex_clients", "code": "expected_one_player", "hint": ONE_PLAYER_HINT}])
-    return rooms, uuid_index, title_index, _validate_automations(data, rooms), _validate_options(data)
+    return RoomState(rooms, uuid_index, title_index, _validate_automations(data, rooms), _validate_options(data))
 
 
-EMPTY_STATE = ({}, {}, {}, [], _validate_options({}))
+EMPTY_STATE = RoomState({}, {}, {}, [], _validate_options({}))
 
 
-def _resolve(state, uuid, title) -> str | None:
+def _resolve(state: RoomState, uuid, title) -> str | None:
     """The room a player uuid or title selects in one published state: uuid first, then title."""
-    _, uuid_index, title_index, _, _ = state
-    if uuid and uuid in uuid_index:
-        return uuid_index[uuid]
+    if uuid and uuid in state.uuid_index:
+        return state.uuid_index[uuid]
     if title:
-        return title_index.get(title.strip().lower())
+        return state.title_index.get(title.strip().lower())
     return None
 
 
@@ -269,10 +279,10 @@ class RoomRegistry:
 
     @property
     def rooms(self):
-        return self._state[0]
+        return self._state.rooms
 
     def automations_for(self, room_key, event):
-        return [entry for entry in self._state[3]
+        return [entry for entry in self._state.automations
                 if entry["trigger"]["room"] == room_key and entry["trigger"]["event"] == event]
 
     def validate(self):
@@ -306,14 +316,14 @@ class RoomRegistry:
         room = _resolve(state, uuid if isinstance(uuid, str) else None, title if isinstance(title, str) else None)
         if room is None:
             return None
-        return (state[0][room]["plex_clients"][0].get("title") or "").strip() or room
+        return (state.rooms[room]["plex_clients"][0].get("title") or "").strip() or room
 
     def playback_idle_seconds(self) -> int:
-        return self._state[4]["playback_idle_minutes"] * 60
+        return self._state.options["playback_idle_minutes"] * 60
 
     def server_allowed(self, payload: dict) -> bool:
         """True unless an allow-list is configured and the payload's ``Server.uuid`` is not on it."""
-        allowed = self._state[4]["allowed_server_uuids"]
+        allowed = self._state.options["allowed_server_uuids"]
         if allowed is None:
             return True
         server = (payload or {}).get("Server")
