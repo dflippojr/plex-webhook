@@ -170,3 +170,26 @@ def test_invalid_encoding_preserves_mapping(registry, rooms_file):
         registry.reload()
     assert error.value.detail == [{"path": "$", "code": "invalid_yaml"}]
     assert registry._state is before
+
+
+# The string-list shapes shared by dim_media_types and allowed_server_uuids; the refactor must keep these exact.
+STRING_LIST_CANDIDATES = [
+    ("rooms: {den: {plex_clients: [{uuid: uuid-den}], dim_media_types: movie}}", "rooms.den.dim_media_types", "expected_list"),
+    ("rooms: {den: {plex_clients: [{uuid: uuid-den}], dim_media_types: []}}", "rooms.den.dim_media_types", "expected_nonempty_list"),
+    ("rooms: {den: {plex_clients: [{uuid: uuid-den}], dim_media_types: [' ']}}", "rooms.den.dim_media_types[0]", "expected_nonempty_string"),
+    ("rooms: {den: {plex_clients: [{uuid: uuid-den}], dim_media_types: [1]}}", "rooms.den.dim_media_types[0]", "expected_nonempty_string"),
+    ("rooms: {}\nallowed_server_uuids: server-ours", "allowed_server_uuids", "expected_nonempty_list"),
+    ("rooms: {}\nallowed_server_uuids: []", "allowed_server_uuids", "expected_nonempty_list"),
+    ("rooms: {}\nallowed_server_uuids: [' ']", "allowed_server_uuids[0]", "expected_nonempty_string"),
+    ("rooms: {}\nallowed_server_uuids: [1]", "allowed_server_uuids[0]", "expected_nonempty_string"),
+]
+
+
+@pytest.mark.parametrize("source,path,code", STRING_LIST_CANDIDATES)
+def test_string_list_errors_report_exact_path_and_code(registry, rooms_file, source, path, code):
+    before = registry._state
+    rooms_file.write_text(source, encoding="utf-8")
+    with pytest.raises(RoomConfigError) as error:
+        registry.reload()
+    assert error.value.detail == [{"path": path, "code": code}]
+    assert registry._state is before
