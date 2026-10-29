@@ -108,20 +108,24 @@ def _integer(entry, field, path, low, high):
         raise RoomConfigError([{"path": f"{path}.{field}", "code": "expected_percent" if high == 100 else "expected_integer"}])
 
 
+def _string_list(value, path, *, non_list_code):
+    """A non-empty list of non-blank strings; ``path`` locates the list and ``non_list_code`` reports a non-list."""
+    if not isinstance(value, list):
+        raise RoomConfigError([{"path": path, "code": non_list_code}])
+    if not value:
+        raise RoomConfigError([{"path": path, "code": "expected_nonempty_list"}])
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise RoomConfigError([{"path": f"{path}[{index}]", "code": "expected_nonempty_string"}])
+
+
 def _media_types(room, path):
     """Optional list of Plex ``Metadata.type`` values that dim the room; absent or null means every type."""
     types = room.get("dim_media_types")
     if types is None:
         return
-    field = f"{path}.dim_media_types"
-    if not isinstance(types, list):
-        raise RoomConfigError([{"path": field, "code": "expected_list"}])
     # An empty list would silently stop the room from ever dimming, so it is rejected rather than honored.
-    if not types:
-        raise RoomConfigError([{"path": field, "code": "expected_nonempty_list"}])
-    for index, value in enumerate(types):
-        if not isinstance(value, str) or not value.strip():
-            raise RoomConfigError([{"path": f"{field}[{index}]", "code": "expected_nonempty_string"}])
+    _string_list(types, f"{path}.dim_media_types", non_list_code="expected_list")
 
 
 ONE_PLAYER_HINT = "Create one room per Plex player and put each light in the room it belongs to."
@@ -191,11 +195,7 @@ def _validate_options(data):
     servers = data.get("allowed_server_uuids")
     if servers is not None:
         # An empty list would silently ignore every event, so it is rejected rather than honored.
-        if not isinstance(servers, list) or not servers:
-            raise RoomConfigError([{"path": "allowed_server_uuids", "code": "expected_nonempty_list"}])
-        for index, value in enumerate(servers):
-            if not isinstance(value, str) or not value.strip():
-                raise RoomConfigError([{"path": f"allowed_server_uuids[{index}]", "code": "expected_nonempty_string"}])
+        _string_list(servers, "allowed_server_uuids", non_list_code="expected_nonempty_list")
         servers = frozenset(servers)
     return {"playback_idle_minutes": minutes, "allowed_server_uuids": servers}
 
