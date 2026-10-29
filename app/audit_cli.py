@@ -12,11 +12,9 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.audit import OPERATIONS
+from app.audit import OPERATIONS, RECORD_COLUMNS, has_detail_column
 
-COLUMNS = ("id", "recorded_at", "correlation_id", "source", "actor_kind", "actor_id",
-           "actor_verified", "action", "target_kind", "target_id", "outcome", "reason_code",
-           "changed_fields", "checksum")
+COLUMNS = ("id", *RECORD_COLUMNS)
 
 
 def open_database(path, *, writable=False):
@@ -64,7 +62,7 @@ def read_records(conn, args):
             params.append(value)
     params.append(args.limit)
     columns = COLUMNS
-    if "detail" in {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}:
+    if has_detail_column(conn):
         columns = COLUMNS + ("detail",)
     # Column names/operators come exclusively from fixed application constants.
     query = f"SELECT {', '.join(columns)} FROM audit_events WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?"

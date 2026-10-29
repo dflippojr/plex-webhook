@@ -9,10 +9,9 @@ import hashlib
 import hmac
 import os
 
-ADMIN_ACTOR = "owner-admin"
-PLEX_ACTOR = "plex-server"
+from app.audit import DENIAL_REASONS  # re-exported: main.py pre-creates metric labels from it
+
 MIN_TOKEN_LENGTH = 16
-DENIAL_REASONS = ("auth_unconfigured", "missing_credential", "invalid_credential")
 
 
 def _digest(value):
