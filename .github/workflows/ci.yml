@@ -1,0 +1,62 @@
+name: CI
+
+# The offline pytest suite with the coverage floor from .coveragerc, ending in
+# one always-reporting `gate` job. This repository is public, so every job runs
+# on GitHub-hosted runners; never add a self-hosted runner.
+# tests/test_workflows.py fails when a workflow job names any other runner or
+# when `gate` stops needing every other job here.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# No concurrency block on purpose: every run on master must finish, so `gate`
+# has a result for every master commit. If one is ever added, it must never
+# cancel master runs:
+#   concurrency:
+#     group: ci-${{ github.ref }}
+#     cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install dependencies
+        run: >-
+          pip install --require-hashes --only-binary :all: -r requirements-dev.lock
+
+      # fail_under in .coveragerc turns coverage below the floor into a failure.
+      - name: Test with coverage
+        run: pytest --cov=app --cov-report=term-missing
+
+  # The check to require. It always runs and passes only when every job above
+  # passed, so a failed, cancelled or skipped job turns it red.
+  gate:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every CI job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "$failed" ]; then
+            echo "::error::These CI jobs did not pass: $failed"
+            exit 1
+          fi

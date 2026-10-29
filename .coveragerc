@@ -1,2 +1,10 @@
 [run]
 relative_files = True
+
+[report]
+# Minimum line coverage of app/ (percent) for `pytest --cov=app`, locally and
+# in CI. Measured 97.61% (1716 of 1758 lines) on 2026-10-29 with Python 3.12,
+# so the floor sits just below it. The floor only goes up: raise it when
+# coverage rises, never lower it to get a change through.
+fail_under = 97
+precision = 2
