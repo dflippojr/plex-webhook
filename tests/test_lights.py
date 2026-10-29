@@ -488,6 +488,18 @@ def test_discovery_send_oserror_returns_nothing_and_logs(fake_socket, caplog):
     assert fake_socket.instances and all(s.closed for s in fake_socket.instances)
 
 
+def test_bind_oserror_closes_the_socket(fake_socket, monkeypatch, secrets):
+    def bind(self, *args):
+        raise OSError("address in use")
+
+    monkeypatch.setattr(fake_socket, "bind", bind)
+    assert lights.GoveeController()._discover_ips(["AA:BB"]) == {}
+    secrets[GOVEE["id"]] = {"ip": "192.168.1.9"}
+    assert lights.read_state(GOVEE) == lights.StateReading.failed()
+    assert len(fake_socket.instances) == 2 and all(s.closed for s in fake_socket.instances)
+    assert all(not s.sent for s in fake_socket.instances)
+
+
 def test_batch_scan_matches_each_reply_to_its_own_device(fake_socket):
     fake_socket.replies = [scan_reply("G1", "10.0.0.9"), scan_reply("OTHER", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
     assert lights.GoveeController()._discover_ips(["G0", "G1", "G2"]) == {"G0": "10.0.0.9", "G1": "10.0.0.9"}

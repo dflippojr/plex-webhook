@@ -304,6 +304,33 @@ def _static_ip(device_id) -> str | None:
     return _device_secret(device_id).get("ip") if isinstance(device_id, str) else None
 
 
+def _listen_socket():
+    """A UDP socket bound to the Govee reply port; closed again if setup fails."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", GOVEE_LAN_LISTEN_PORT))
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _replies(sock, deadline: float):
+    """Yield (parsed json, source ip) per datagram until ``deadline``; undecodable ones are skipped."""
+    while (remaining := deadline - time.monotonic()) > 0:
+        sock.settimeout(remaining)
+        try:
+            data, addr = sock.recvfrom(4096)
+        except socket.timeout:
+            return
+        try:
+            reply = json.loads(data.decode("utf-8"))
+        except (ValueError, RecursionError):
+            continue
+        yield reply, addr[0]
+
+
 class GoveeController:
     """Hybrid Govee control: LAN first, Govee Cloud API as fallback.
 
@@ -377,23 +404,12 @@ class GoveeController:
         return reading
 
     def _read_devstatus(self, ip: str, deadline: float) -> StateReading:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = _listen_socket()
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", GOVEE_LAN_LISTEN_PORT))
             sock.sendto(json.dumps({"msg": {"cmd": "devStatus", "data": {}}}).encode("utf-8"),
                         (ip, GOVEE_LAN_CONTROL_PORT))
-            while (remaining := deadline - time.monotonic()) > 0:
-                sock.settimeout(remaining)
-                try:
-                    data, addr = sock.recvfrom(4096)
-                except socket.timeout:
-                    break
-                if addr[0] != ip:
-                    continue
-                try:
-                    reply = json.loads(data.decode("utf-8"))
-                except (ValueError, RecursionError):
+            for reply, source_ip in _replies(sock, deadline):
+                if source_ip != ip:
                     continue
                 message = reply.get("msg") if isinstance(reply, dict) else None
                 if isinstance(message, dict) and message.get("cmd") == "devStatus":
@@ -464,28 +480,17 @@ class GoveeController:
 
         sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", GOVEE_LAN_LISTEN_PORT))
+            sock = _listen_socket()
             sock.settimeout(timeout)
             sock.sendto(request, (GOVEE_LAN_SCAN_MULTICAST_ADDR, GOVEE_LAN_SCAN_PORT))
 
-            deadline = time.monotonic() + timeout
-            # Stop as soon as every requested device has answered.
-            while len(found) < len(device_ids) and (remaining := deadline - time.monotonic()) > 0:
-                sock.settimeout(remaining)
-                try:
-                    data, addr = sock.recvfrom(4096)
-                except socket.timeout:
-                    break
-                try:
-                    reply = json.loads(data.decode("utf-8"))
-                except (ValueError, RecursionError):
-                    continue
+            for reply, source_ip in _replies(sock, time.monotonic() + timeout):
                 for device_id in device_ids:
-                    ip = None if device_id in found else self._discovery_address(reply, device_id, addr[0])
+                    ip = None if device_id in found else self._discovery_address(reply, device_id, source_ip)
                     if ip is not None:
                         found[device_id] = ip
+                if len(found) >= len(device_ids):
+                    break  # every requested device has answered
         except OSError:
             logger.info("reason=discovery_failed brand=govee operation=lan_discovery devices=%d fallback=cloud",
                         len(device_ids))
