@@ -58,30 +58,29 @@ LIGHT_DECISIONS = {
     "dim_skipped_off": {"was_off"},
     "dim_kept_original": {"record_exists"},
 }
+# Admin-route denials, in the order main.py pre-creates their metric labels.
+DENIAL_REASONS = ("auth_unconfigured", "missing_credential", "invalid_credential")
+CONFIG_REJECTIONS = {"invalid_config", "config_unavailable"}
 OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
         "received": {"accepted", "server_not_allowed"},
         "rejected": {"missing_payload", "invalid_json", "invalid_payload", "invalid_form"},
     }),
     "rooms.reload": ("http", "anonymous", "rooms", {
-        "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},
-        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
+        "activated": {"loaded"}, "rejected": CONFIG_REJECTIONS, "denied": set(DENIAL_REASONS),
     }),
     "rooms.validate": ("http", "anonymous", "rooms", {
-        "validated": {"valid"}, "rejected": {"invalid_config", "config_unavailable"},
-        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
+        "validated": {"valid"}, "rejected": CONFIG_REJECTIONS, "denied": set(DENIAL_REASONS),
     }),
-    "rooms.read": ("http", "anonymous", "rooms", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
+    "rooms.read": ("http", "anonymous", "rooms", {"denied": set(DENIAL_REASONS)}),
     # A read-only light check; per-light values never enter the trail.
     "lights.check": ("http", "anonymous", "room", {
         "completed": {"read"}, "rejected": {"unknown_room"},
         "failed": {"timed_out", "queue_overflow", "superseded", "check_error"},
-        "denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},
+        "denied": set(DENIAL_REASONS),
     }),
-    "clients.read": ("http", "anonymous", "clients", {"denied": {"auth_unconfigured", "missing_credential", "invalid_credential"},}),
-    "service.config_load": ("service", "system", "rooms", {
-        "activated": {"loaded"}, "rejected": {"invalid_config", "config_unavailable"},
-    }),
+    "clients.read": ("http", "anonymous", "clients", {"denied": set(DENIAL_REASONS)}),
+    "service.config_load": ("service", "system", "rooms", {"activated": {"loaded"}, "rejected": CONFIG_REJECTIONS}),
     # Light-action records share the originating receipt's correlation ID and carry the
     # initiating actor in ``detail.on_behalf_of``. Outcomes are transport evidence, never
     # proof of physical state: command_sent / request_accepted_by_transport / unconfirmed.
@@ -120,6 +119,10 @@ def utc_now():
 
 def correlation_id():
     return str(uuid4())
+
+
+def has_detail_column(conn):
+    return "detail" in {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}
 
 
 def checksum(record):
@@ -258,7 +261,7 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     uri = Path(path).resolve().as_uri() + "?mode=rw"
     with WRITE_LOCK, closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
         conn.executescript(SCHEMA)
-        if "detail" not in {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}:
+        if not has_detail_column(conn):
             conn.execute("ALTER TABLE audit_events ADD COLUMN detail TEXT")  # table predates light records
         with conn:
             cursor = conn.execute(
