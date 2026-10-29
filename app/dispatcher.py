@@ -331,9 +331,7 @@ def _automation_action(source, target, action, snapshots, blocked, context, yiel
         _record(context, "light.action_summary", "skipped", "owned_by_newer_source",
                 target, action, action_id, counts={})
         return
-    _record(context, "light.action_queued", "queued", "accepted", target, action, action_id,
-            targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
-                      "brightness": settings["dim"] if action == "dim" else None} for light in room_lights])
+    _record_queued(context, target, action, action_id, room_lights, settings["dim"] if action == "dim" else None)
     _apply(target, action, room_lights, context, action_id, settings, automation_source=source)
 
 
@@ -405,12 +403,10 @@ def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = N
         settings = dict(registry.settings_for(room_key))
     except Exception:
         # Reported by the worker through the same failure path as any other action error.
-        return _action_executor.submit(_apply, room_key, action, None, audit_context, action_id,
-                                       key=("room", room_key), on_drop=on_drop)
-    level = settings["dim"] if action == "dim" else None  # a restore level is read per light at execution time
-    _record(audit_context, "light.action_queued", "queued", "accepted", room_key, action, action_id,
-            targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
-                      "brightness": level} for light in room_lights])
+        room_lights = settings = None
+    else:
+        level = settings["dim"] if action == "dim" else None  # a restore level is read per light at execution time
+        _record_queued(audit_context, room_key, action, action_id, room_lights, level)
     return _action_executor.submit(_apply, room_key, action, room_lights, audit_context, action_id, settings,
                                    key=("room", room_key), on_drop=on_drop)
 
@@ -419,6 +415,12 @@ def _dropped(room_key, reason):
     DISPATCH_DROPPED_TOTAL.labels(room=room_key, reason=reason).inc()
     if reason == "queue_overflow":
         logger.warning("reason=dispatch_queue_overflow limit=%d", ACTION_QUEUE_LIMIT)
+
+
+def _record_queued(context, room_key, action, action_id, room_lights, level):
+    _record(context, "light.action_queued", "queued", "accepted", room_key, action, action_id,
+            targets=[{"brand": _text(light.get("brand")), "id": _text(light.get("id")),
+                      "brightness": level} for light in room_lights])
 
 
 def _text(value):
@@ -484,10 +486,6 @@ def _decide(context, room_key, light, request, action_id, decision, reason, sett
             observed_percent=observed)
 
 
-def _skipped(light, reason):
-    return lights.skipped_result(light, reason)
-
-
 def _dim(room_key, room_lights, settings, context, action_id):
     """Record each light's own brightness, then dim the ones that are on. Never turns a light on.
 
@@ -501,7 +499,7 @@ def _dim(room_key, room_lights, settings, context, action_id):
         if existing:  # a re-dim before the pending restore ran keeps the original value
             if existing["was_off"]:
                 _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
-                results.append(_skipped(light, "light_off"))
+                results.append(lights.skipped_result(light, "light_off"))
                 continue
             _decide(context, room_key, light, "dim", action_id, "dim_kept_original", "record_exists", settings,
                     existing["restore_percent"])
@@ -514,7 +512,7 @@ def _dim(room_key, room_lights, settings, context, action_id):
         if reading.ok and not reading.on:
             db.put_restore_record(room_key, light_id, True, None, dim)
             _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
-            results.append(_skipped(light, "light_off"))
+            results.append(lights.skipped_result(light, "light_off"))
             continue
         restore, reason = (reading.brightness, "read_ok") if reading.ok else (settings["restore"], "read_failed")
         if restore == dim:  # a stored value equal to the dim level could never undo the dim
@@ -539,7 +537,7 @@ def _restore(room_key, room_lights, settings, context, action_id):
         light_id = _text(light.get("id"))
         record = db.get_restore_record(room_key, light_id)
         if record is None:
-            results.append(_skipped(light, "no_record"))
+            results.append(lights.skipped_result(light, "no_record"))
             continue
         dim, restore = record["dim_percent"], record["restore_percent"]
         if record["was_off"]:
@@ -562,7 +560,7 @@ def _restore(room_key, room_lights, settings, context, action_id):
             targets.append(light)
             levels[light_id] = restore
         else:
-            results.append(_skipped(light, "light_off" if record["was_off"] else "manual_change"))
+            results.append(lights.skipped_result(light, "light_off" if record["was_off"] else "manual_change"))
     applied = lights.apply_action("restore", targets, levels) if targets else []
     # Clear records only after the commands: a failure earlier in the loop keeps every record for a retry.
     for light_id in cleared:
