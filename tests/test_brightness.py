@@ -38,6 +38,7 @@ class FakeController:
 
     def __init__(self):
         self.state, self.commands, self.reads, self.prepared, self.unpowered = {}, [], 0, [], []
+        self.outcomes = {}  # light id -> (outcome, reason) the backend reports instead of a clean send
 
     def prepare(self, room_lights):
         self.prepared.append((self.reads, len(self.commands), [light["id"] for light in room_lights]))
@@ -54,7 +55,8 @@ class FakeController:
         if not turn_on:
             self.unpowered.append(light["id"])
         self.state[light["id"]] = on(brightness)
-        return lights.LightResult(light["brand"], light["id"], "lan", "none", "command_sent", "lan_command_sent")
+        outcome, reason = self.outcomes.get(light["id"], ("command_sent", "lan_command_sent"))
+        return lights.LightResult(light["brand"], light["id"], "lan", "none", outcome, reason)
 
 
 @pytest.fixture
@@ -84,7 +86,13 @@ def world(tmp_path, rooms_file, registry, monkeypatch):
                                 "WHERE action = 'light.decision' ORDER BY id").fetchall()
         return [(t, o, r, json.loads(d)) for t, o, r, d in rows]
 
-    world.play, world.stop, world.decisions = play, stop, decisions
+    def audited(action):
+        with sqlite3.connect(path) as conn:
+            rows = conn.execute("SELECT target_id, outcome, reason_code, detail FROM audit_events "
+                                "WHERE action = ? ORDER BY id", (action,)).fetchall()
+        return [(t, o, r, json.loads(d)) for t, o, r, d in rows]
+
+    world.play, world.stop, world.decisions, world.audited = play, stop, decisions, audited
     return world
 
 
@@ -195,6 +203,36 @@ def test_value_equal_to_the_dim_level_is_never_stored(world):
     world.fake.commands.clear()
     world.stop()
     assert world.fake.commands[0] == ("restore", "g1", 80)
+
+
+@pytest.mark.parametrize("unconfirmed,reason,counts", [
+    ({"g1", "t1"}, "all_unconfirmed", {"unconfirmed": 2}),
+    ({"t1"}, "some_unconfirmed", {"command_sent": 1, "unconfirmed": 1}),
+])
+def test_summary_reports_all_and_some_unconfirmed(world, unconfirmed, reason, counts):
+    world.fake.state = {"g1": on(60), "t1": on(50)}
+    world.fake.outcomes = {light: ("unconfirmed", "result_unconfirmed") for light in unconfirmed}
+    world.play()
+    # Read back from the audit database: only records that passed audit.append are stored.
+    summaries = [s for s in world.audited("light.action_summary") if s[3]["request"] == "dim"]
+    assert [(t, o, r) for t, o, r, _ in summaries] == [(ROOM, "unconfirmed", reason)]
+    assert summaries[0][3]["counts"] == counts
+
+
+def test_equal_dim_and_restore_levels_write_no_record(world, rooms_file, registry):
+    candidate(rooms_file, YAML.replace("restore_brightness_percent: 80", "restore_brightness_percent: 30"))
+    registry.reload()
+    world.fake.state = {"g1": on(30)}  # t1 reads off
+    world.play()
+    assert ("dim", "g1", 30) in world.fake.commands
+    assert db.get_restore_record(ROOM, "g1") is None
+    assert [d[1:3] for d in world.decisions() if d[0] == "g1"] == [("dim_recorded", "at_dim_level")]
+    # Pinned as today's behaviour: the decision says recorded although nothing was stored.
+    world.fake.commands.clear()
+    world.stop()
+    assert all(command[1] != "g1" for command in world.fake.commands)
+    restored = [r[:3] for r in world.audited("light.result") if r[0] == "g1" and r[3]["request"] == "restore"]
+    assert restored == [("g1", "skipped", "no_record")]
 
 
 def test_restart_between_dim_and_restore_still_restores(world):

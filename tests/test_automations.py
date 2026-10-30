@@ -1,4 +1,5 @@
 """Cross-room lifecycle behavior with real restore storage and fake lights only."""
+import logging
 import threading
 
 import pytest
@@ -7,6 +8,7 @@ import yaml
 from app import db, dispatcher, lights
 from app.rooms import RoomConfigError
 from conftest import drain, payload
+from test_action_queue import trail  # noqa: F401 (fixture)
 from test_brightness import FakeController, OFF, on
 
 
@@ -22,8 +24,9 @@ def world(registry, rooms_file, monkeypatch):
     rooms = {room: {"plex_clients": [{"title": room}], "lights": [{"brand": "govee", "id": room}]}
              for room in fake.state}
 
-    def configure(entries):
-        rooms_file.write_text(yaml.safe_dump({"rooms": rooms, "automations": entries}), encoding="utf-8")
+    def configure(entries, drop=()):
+        kept = {room: config for room, config in rooms.items() if room not in drop}
+        rooms_file.write_text(yaml.safe_dump({"rooms": kept, "automations": entries}), encoding="utf-8")
         registry.reload()
 
     configure([rule()])
@@ -31,8 +34,8 @@ def world(registry, rooms_file, monkeypatch):
     return fake
 
 
-def event(room, name="media.play", wait=True):
-    dispatcher.handle_event(payload(name, room))
+def event(room, name="media.play", wait=True, context=None):
+    dispatcher.handle_event(payload(name, room), context)
     if wait:
         drain()
 
@@ -168,6 +171,40 @@ def test_config_reload_keeps_pending_restore_owner(world):
     world.configure([])
     event("a", "media.stop")
     assert world.commands[-1] == ("restore", "b", 80)
+
+
+AUTOMATION_FAILED = "reason=dispatcher_action_failed operation=automation"
+
+
+def test_automation_error_is_logged_and_worker_continues(world, monkeypatch, caplog):
+    event("a")
+
+    def broken(source):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(dispatcher.db, "automation_targets", broken)
+    with caplog.at_level(logging.ERROR, logger=dispatcher.logger.name):
+        event("a", "media.stop")
+    assert [r.getMessage() for r in caplog.records].count(AUTOMATION_FAILED) == 1
+    assert world.commands[-1] == ("restore", "a", 80)  # the source room's own restore still ran
+    assert ("restore", "b", 80) not in world.commands
+    event("c")  # the worker keeps taking queued actions
+    assert world.commands[-1] == ("dim", "c", 20)
+
+
+def test_restore_skips_owned_target_removed_by_reload(world, trail, caplog):
+    event("a")
+    assert db.automation_targets("a") == {"b"}
+    world.configure([], drop={"b"})
+    before = list(world.commands)
+    with caplog.at_level(logging.ERROR, logger=dispatcher.logger.name):
+        event("a", "media.stop", context=trail.context)
+    assert world.commands == before + [("restore", "a", 80)]
+    assert AUTOMATION_FAILED not in [r.getMessage() for r in caplog.records]
+    assert trail.errors == []
+    light_records = [r for r in trail.stored if r["action"].startswith("light.")]
+    assert light_records and all(r["target_id"] != "b" for r in light_records)
+    assert all(target["id"] != "b" for r in light_records for target in r["detail"].get("targets", ()))
 
 
 def test_queued_automation_yields_to_new_playback(world):
