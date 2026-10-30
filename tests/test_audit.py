@@ -256,3 +256,80 @@ def test_prune_deletes_events_one_microsecond_before_cutoff_in_either_shape(tmp_
     result, kept = _boundary_prune(tmp_path, before + ["2026-07-18T12:00:00.000001+00:00"], before[0])
     assert result["events_deleted"] == 2 and result["event_log_removed"] == 1
     assert kept == ["2026-07-18T12:00:00.000001+00:00"]
+
+
+def _audit_rows(path):
+    with sqlite3.connect(path) as conn:
+        if conn.execute("SELECT name FROM sqlite_master WHERE name='audit_events'").fetchone() is None:
+            return []
+        return conn.execute("SELECT action FROM audit_events").fetchall()
+
+
+@pytest.mark.parametrize("call", [
+    dict(action="rooms.reload", outcome="denied", reason_code="invalid_credential", admin=True),
+    dict(action="rooms.reload", outcome="activated", reason_code="loaded", target_id="x"),
+    dict(action="clients.read", outcome="denied", reason_code="missing_credential", target_id="x"),
+])
+def test_admin_denied_and_untargeted_ids_are_rejected(audit_db, call):
+    with pytest.raises(ValueError):
+        audit.append(audit_db, correlation=audit.correlation_id(), **call)
+    assert _audit_rows(audit_db) == []
+
+
+def test_room_target_id_is_stored_for_room_operations(audit_db):
+    audit.append(audit_db, action="lights.check", outcome="completed", reason_code="read",
+                 correlation=audit.correlation_id(), admin=True, target_id="den")
+    [row] = records(audit_db)
+    assert (row["target_kind"], row["target_id"], row["actor_id"]) == ("room", "den", "owner-admin")
+
+
+def _queued(path, brand="govee", brightness=20):
+    return audit.append(path, action="light.action_queued", outcome="queued", reason_code="accepted",
+                        correlation=audit.correlation_id(), target_id="den",
+                        detail={"action_id": audit.correlation_id(), "request": "dim", "on_behalf_of": "plex_server",
+                                "targets": [{"brand": brand, "id": "light-1", "brightness": brightness}]})
+
+
+@pytest.mark.parametrize("target", [{"brand": ""}, {"brand": 7}, {"brightness": 101}, {"brightness": -1},
+                                    {"brightness": True}])
+def test_light_detail_rejects_bad_labels_and_numbers(audit_db, target):
+    with pytest.raises(ValueError):
+        _queued(audit_db, **target)
+    assert _audit_rows(audit_db) == []
+
+
+def test_light_detail_accepts_brightness_bounds_and_none(audit_db):
+    for brightness in (None, 0, 100):
+        _queued(audit_db, brightness=brightness)
+    assert [row["detail"]["targets"][0]["brightness"] for row in records(audit_db)] == [None, 0, 100]
+
+
+def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(audit_db, capsys):
+    legacy_schema = audit.SCHEMA.replace("checksum TEXT NOT NULL,\n    detail TEXT", "checksum TEXT NOT NULL")
+    assert legacy_schema != audit.SCHEMA
+    # A receipt as a deployed service wrote it before light records: no detail key in the checksum.
+    old = dict(recorded_at=audit.utc_now(), correlation_id=audit.correlation_id(), source="webhook",
+               actor_kind="plex_server", actor_id="plex-server", actor_verified=0, action="webhook.receipt",
+               target_kind="event", target_id="1", outcome="received", reason_code="accepted", changed_fields={})
+    old["checksum"] = audit.checksum(old)
+    old["changed_fields"] = "{}"
+    with sqlite3.connect(audit_db) as conn:
+        conn.executescript(legacy_schema)
+        assert not audit.has_detail_column(conn)
+        conn.execute(f"INSERT INTO audit_events ({', '.join(audit.RECORD_COLUMNS)}) "
+                     f"VALUES ({', '.join('?' * len(audit.RECORD_COLUMNS))})",
+                     tuple(old[key] for key in audit.RECORD_COLUMNS))
+    audit.append(audit_db, action="light.result", outcome="command_sent", reason_code="lan_command_sent",
+                 correlation=audit.correlation_id(), target_id="light-1",
+                 detail={"action_id": audit.correlation_id(), "request": "dim", "on_behalf_of": "plex_server",
+                         "brand": "govee", "transport": "lan", "credential_source": "none",
+                         "progress": ["brightness"], "attempts": []})
+    with sqlite3.connect(audit_db) as conn:
+        assert audit.has_detail_column(conn)
+    old, new = records(audit_db)
+    assert old["checksum"] == audit.checksum(old) and new["checksum"] == audit.checksum(new)
+    assert new["detail"]["brand"] == "govee" and new["detail"]["progress"] == ["brightness"]
+    assert audit_cli.main(["--db", str(audit_db), "export"]) == 0
+    exported = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["action"] for row in exported] == ["webhook.receipt", "light.result"]
+    assert ["detail" in row for row in exported] == [False, True]
