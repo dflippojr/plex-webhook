@@ -139,6 +139,26 @@ def test_expiry_updates_metrics(registry, light_calls, clock):
     assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
+def test_stop_by_uuid_restores_after_title_only_play(registry, light_calls, clock):
+    labels = {"room": "living_room"}
+    send("media.play")
+    send("media.play", uuid="uuid-living")
+    send("media.stop", uuid="uuid-living")
+    assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    clock.advance(6 * HOUR)
+    expire()
+    assert actions(light_calls) == ["dim", "restore"]  # restored exactly once
+
+
+def test_stop_by_title_restores_after_uuid_play(registry, light_calls, clock):
+    labels = {"room": "living_room"}
+    send("media.play", title="whatever", uuid="uuid-living")
+    send("media.stop", title="living room tv")
+    assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+
+
 def test_expiry_restore_is_audited_as_playback_expiry(client, light_calls, clock):
     import app.main as main
 
