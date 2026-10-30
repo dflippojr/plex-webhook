@@ -110,6 +110,7 @@ def _reset_restore_state(dispatcher):
     from app import db
 
     dispatcher._active_clients.clear()
+    dispatcher._activating_uuids.clear()
     dispatcher._pending_rooms.clear()
     with db.get_connection() as conn:
         conn.execute("DELETE FROM light_restore_records")
