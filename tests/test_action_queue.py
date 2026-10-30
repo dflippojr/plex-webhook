@@ -142,6 +142,40 @@ def test_failing_action_does_not_stop_the_worker():
     assert isinstance(failing.exception(timeout=5), ZeroDivisionError)
 
 
+def test_drop_callbacks_none_and_raising_do_not_stop_submit(blocked_worker, monkeypatch, caplog):
+    queue = dispatcher._action_executor
+    ran, drops = [], []
+
+    def raising(reason):
+        raise RuntimeError("drop callback failed")
+
+    with caplog.at_level(logging.ERROR, logger="plex-webhook"):
+        first = queue.submit(ran.append, "first", key="x")
+        second = queue.submit(ran.append, "second", key="x", on_drop=raising)
+        filler = queue.submit(ran.append, "filler", key="y", on_drop=lambda reason: drops.append(("filler", reason)))
+        # At limit 1 the third submission drops the raising entry and the filler in one pass.
+        monkeypatch.setattr(queue, "limit", 1)
+        third = queue.submit(ran.append, "third", key="x", on_drop=lambda reason: drops.append(("third", reason)))
+    unbounded(monkeypatch)
+    assert first.cancelled() and second.cancelled() and filler.cancelled()
+    assert drops == [("filler", "queue_overflow")]  # the callback after the raising one still ran
+    failures = [r for r in caplog.records if "dispatcher_action_failed operation=drop" in r.getMessage()]
+    assert len(failures) == 1
+    blocked_worker.set()
+    third.result(timeout=5)
+    assert ran == ["third"]
+
+
+def test_cancelled_queued_entry_is_skipped(blocked_worker):
+    ran = []
+    cancelled = dispatcher._action_executor.submit(ran.append, "cancelled")
+    later = dispatcher._action_executor.submit(ran.append, "later")
+    assert cancelled.cancel()
+    blocked_worker.set()
+    later.result(timeout=5)
+    assert ran == ["later"] and cancelled.cancelled()
+
+
 # --- dispatcher behavior ------------------------------------------------------------
 
 

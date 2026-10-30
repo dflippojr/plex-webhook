@@ -281,3 +281,29 @@ def test_superseded_check_is_not_counted_as_a_dropped_action(den, blocked_worker
     assert dropped_actions("superseded") == before
     blocked_worker.set()
     assert len(second.result(timeout=10)) == len(LIGHTS)
+
+
+def test_check_error_is_500_audited_and_redacted(den, monkeypatch, caplog):
+    def broken(room_key, room_lights):
+        raise RuntimeError("SECRET")
+
+    monkeypatch.setattr(dispatcher, "_check", broken)
+    with caplog.at_level(logging.DEBUG, logger="plex-webhook"):
+        response = den.get(PATH)
+    assert response.status_code == 500 and response.json() == {"detail": "Light check failed"}
+    assert "SECRET" not in response.text
+    [record] = check_records(den)
+    assert (record["outcome"], record["reason_code"], record["target_id"]) == ("failed", "check_error", ROOM)
+    assert any("reason=light_check_failed" in r.getMessage() for r in caplog.records)
+    assert "SECRET" not in caplog.text
+
+
+def test_cancelled_check_superseded_by_a_newer_check_stays_cancelled(den, blocked_worker, caplog):
+    with caplog.at_level(logging.ERROR, logger="plex-webhook"):
+        first = dispatcher.check_lights(ROOM)
+        assert first.cancel()
+        second = dispatcher.check_lights(ROOM)  # same key, so it supersedes the cancelled check
+    assert first.cancelled()
+    assert not any("dispatcher_action_failed" in r.getMessage() for r in caplog.records)
+    blocked_worker.set()
+    assert len(second.result(timeout=10)) == len(LIGHTS)
