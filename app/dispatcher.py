@@ -264,7 +264,9 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
         logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
         return
 
-    client_id = _client_id(payload)
+    # The room's one player may arrive by uuid or by title alone; one key for it means its play and
+    # stop always touch the same entry.
+    client_id = registry.client_key(payload) or _client_id(payload)
     with _state_lock:
         active = _active_clients.setdefault(room_key, {})
         was_active = len(active) > 0

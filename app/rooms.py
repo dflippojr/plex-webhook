@@ -264,6 +264,11 @@ def _resolve(state: RoomState, uuid, title) -> str | None:
     return None
 
 
+def _client_label(state: RoomState, room: str) -> str:
+    """The room's configured client title, or the room key when that client has no title."""
+    return (state.rooms[room]["plex_clients"][0].get("title") or "").strip() or room
+
+
 class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
@@ -316,7 +321,24 @@ class RoomRegistry:
         room = _resolve(state, uuid if isinstance(uuid, str) else None, title if isinstance(title, str) else None)
         if room is None:
             return None
-        return (state.rooms[room]["plex_clients"][0].get("title") or "").strip() or room
+        return _client_label(state, room)
+
+    def client_key(self, payload: dict) -> str | None:
+        """The room's configured client label when this payload is that player, whether it carries the uuid,
+        the title alone, or both; None otherwise.
+
+        A uuid the room does not list, with a matching title, is another device that shares the title.
+        """
+        player = (payload or {}).get("Player") or {}
+        uuid = player.get("uuid")
+        state = self._state
+        room = _resolve(state, uuid, player.get("title"))
+        if room is None:
+            return None
+        configured = state.rooms[room]["plex_clients"][0].get("uuid")
+        if uuid and configured and uuid != configured:
+            return None
+        return _client_label(state, room)
 
     def playback_idle_seconds(self) -> int:
         return self._state.options["playback_idle_minutes"] * 60
