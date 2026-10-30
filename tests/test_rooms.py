@@ -1,7 +1,7 @@
 from conftest import payload
 import pytest
 
-from app.rooms import EMPTY_STATE, RoomConfigError, RoomConfigUnavailable, RoomRegistry
+from app.rooms import EMPTY_STATE, PlayerMatch, RoomConfigError, RoomConfigUnavailable, RoomRegistry
 
 
 def test_resolves_by_uuid(registry):
@@ -23,28 +23,29 @@ def test_unknown_or_missing_player(registry):
     assert registry.resolve_room(None) is None
 
 
-def test_client_key_is_the_configured_client_whichever_identifier_arrives(registry):
-    assert registry.client_key(payload("media.play")) == "Living Room TV"
-    assert registry.client_key(payload("media.play", title="whatever", uuid="uuid-living")) == "Living Room TV"
-    assert registry.client_key(payload("media.play", title=" bedroom APPLE tv ")) == "Bedroom Apple TV"
+def test_match_player_labels_the_room_client_whichever_identifier_arrives(registry):
+    living = PlayerMatch("living_room", "Living Room TV", True)
+    assert registry.match_player(payload("media.play")) == living
+    assert registry.match_player(payload("media.play", title="whatever", uuid="uuid-living")) == living
+    assert registry.match_player(payload("media.play", title=" bedroom APPLE tv ")) == ("bedroom", "Bedroom Apple TV", True)
 
 
-def test_client_key_is_none_for_an_unlisted_uuid_or_unmapped_player(registry):
-    # A uuid the room does not list is another device that shares the configured title.
-    assert registry.client_key(payload("media.play", uuid="never-started")) is None
-    assert registry.client_key(payload("media.play", title="Kitchen")) is None
-    assert registry.client_key({}) is None
+def test_match_player_flags_an_unlisted_uuid_and_ignores_unmapped_players(registry):
+    # A uuid the room does not list may be another device that shares the configured title.
+    assert registry.match_player(payload("media.play", uuid="never-started")) == ("living_room", "Living Room TV", False)
+    assert registry.match_player(payload("media.play", title="Kitchen")) is None
+    assert registry.match_player({}) is None
 
 
-def test_client_key_matches_any_uuid_when_the_room_lists_none(rooms_file):
+def test_match_player_accepts_any_uuid_when_the_room_lists_none(rooms_file):
     rooms_file.write_text('''rooms:
   den:
     plex_clients: [{title: TV}]
     lights: [{brand: unsupported, id: fake-light}]
 ''', encoding="utf-8")
     reg = RoomRegistry(rooms_file)
-    assert reg.client_key(payload("media.play", title="tv", uuid="any-uuid")) == "TV"
-    assert reg.client_key(payload("media.play", title="tv")) == "TV"
+    assert reg.match_player(payload("media.play", title="tv", uuid="any-uuid")) == ("den", "TV", True)
+    assert reg.match_player(payload("media.play", title="tv")) == ("den", "TV", True)
 
 
 def test_lights_for(registry):

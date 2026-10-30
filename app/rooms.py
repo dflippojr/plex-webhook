@@ -16,6 +16,14 @@ DEFAULT_PLAYBACK_IDLE_MINUTES = 6 * 60
 MAX_PLAYBACK_IDLE_MINUTES = 7 * 24 * 60
 
 
+class PlayerMatch(NamedTuple):
+    """A payload's player resolved to its room; see ``RoomRegistry.match_player``."""
+
+    room: str
+    label: str
+    configured: bool
+
+
 class RoomState(NamedTuple):
     """One validated configuration, published as a single reference."""
 
@@ -323,11 +331,11 @@ class RoomRegistry:
             return None
         return _client_label(state, room)
 
-    def client_key(self, payload: dict) -> str | None:
-        """The room's configured client label when this payload is that player, whether it carries the uuid,
-        the title alone, or both; None otherwise.
+    def match_player(self, payload: dict) -> PlayerMatch | None:
+        """The room this payload's player resolves to, with that room's one client label, from one snapshot.
 
-        A uuid the room does not list, with a matching title, is another device that shares the title.
+        ``configured`` is False for a matching title carrying a uuid the room does not list: a stop or pause
+        from it may be another device that shares the title, so it must not end the room's playback.
         """
         player = (payload or {}).get("Player") or {}
         uuid = player.get("uuid")
@@ -335,10 +343,8 @@ class RoomRegistry:
         room = _resolve(state, uuid, player.get("title"))
         if room is None:
             return None
-        configured = state.rooms[room]["plex_clients"][0].get("uuid")
-        if uuid and configured and uuid != configured:
-            return None
-        return _client_label(state, room)
+        listed = state.rooms[room]["plex_clients"][0].get("uuid")
+        return PlayerMatch(room, _client_label(state, room), not (uuid and listed and uuid != listed))
 
     def playback_idle_seconds(self) -> int:
         return self._state.options["playback_idle_minutes"] * 60

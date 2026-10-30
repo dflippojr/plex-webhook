@@ -255,27 +255,28 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
     if event not in ACTIVATE_EVENTS and event not in DEACTIVATE_EVENTS:
         return
 
-    room_key = registry.resolve_room(payload)
-    if room_key is None:
+    match = registry.match_player(payload)
+    if match is None:
         logger.debug("event=%s from unmapped client, ignoring", event)
         return
+    room_key = match.room
     if event in ACTIVATE_EVENTS and not registry.dims_for(room_key, payload):
         # Pause and stop are never filtered, so this option can never leave a room dimmed.
         logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
         return
 
-    # The room's one player may arrive by uuid or by title alone; one key for it means its play and
-    # stop always touch the same entry.
-    client_id = registry.client_key(payload) or _client_id(payload)
     with _state_lock:
         active = _active_clients.setdefault(room_key, {})
         was_active = len(active) > 0
 
+        # A room has one player, which may arrive by uuid or by title alone: it keeps one entry, under the
+        # room's client label, and a stop or pause from it ends the room's playback whatever the label was.
         if event in ACTIVATE_EVENTS:
             # Every play/resume pushes the expiry out again.
-            active[client_id] = _expires_at(payload, _clock())
-        else:
-            active.pop(client_id, None)
+            active.clear()
+            active[match.label] = _expires_at(payload, _clock())
+        elif match.configured:
+            active.clear()
 
         is_active = len(active) > 0
         _set_room_gauge(room_key, active)
