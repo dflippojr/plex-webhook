@@ -36,6 +36,17 @@ def test_missing_startup_config_disables_dispatcher(tmp_path):
     assert reg.resolve_room(payload("media.play")) is None
 
 
+
+def test_state_is_a_named_room_state(registry, tmp_path):
+    from app.rooms import RoomState
+
+    state = registry.validate()
+    assert isinstance(state, RoomState)
+    assert RoomState._fields == ("rooms", "uuid_index", "title_index", "automations", "options")
+    assert state[0] is state.rooms and "bedroom" in state.rooms
+    assert isinstance(EMPTY_STATE, RoomState)
+    assert RoomRegistry(tmp_path / "absent.yaml")._state == EMPTY_STATE
+
 INVALID_CANDIDATES = [
     ("rooms: [private-value", "$", "invalid_yaml"),
     ("[]", "$", "expected_mapping"),
