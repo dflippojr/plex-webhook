@@ -1,5 +1,6 @@
 """Per-room dim level and per-light restore, with fake controllers and a temporary database only."""
 import json
+import logging
 import sqlite3
 import sys
 import types
@@ -354,6 +355,21 @@ def test_govee_lan_reads_devstatus(monkeypatch, secrets):
     assert lights.read_state(GOVEE) == lights.StateReading(True, False, 64, "lan")
 
 
+@pytest.mark.parametrize("reply", [
+    {"msg": {"cmd": "devStatus", "data": []}},
+    lan_reply(2, 64),
+    lan_reply(1, True),
+    lan_reply(1, 101),
+], ids=["data-not-dict", "onoff-2", "brightness-bool", "brightness-101"])
+def test_govee_lan_status_rejects_invalid_values(monkeypatch, secrets, caplog, reply):
+    caplog.set_level(logging.INFO, logger="plex-webhook")
+    secrets["AA:BB"] = {"ip": "10.0.0.5"}
+    monkeypatch.setattr(lights.socket, "socket", StatusSocket)
+    StatusSocket.reply, StatusSocket.source = reply, "10.0.0.5"
+    assert lights.read_state(GOVEE) == lights.StateReading.failed()
+    assert "state_read_failed" not in caplog.text  # rejected by validation, not by a crash
+
+
 def test_govee_lan_ignores_other_senders_and_times_out(monkeypatch, secrets):
     secrets["AA:BB"] = {"ip": "10.0.0.5"}
     monkeypatch.setattr(lights.socket, "socket", StatusSocket)
@@ -378,6 +394,21 @@ def test_govee_falls_back_to_cloud_state(monkeypatch, secrets):
     assert seen["params"] == {"device": "AA:BB", "model": "H6159"} and seen["timeout"] == lights.STATE_READ_TIMEOUT_S
 
 
+@pytest.mark.parametrize("properties", [
+    [{"powerState": "dim"}, {"brightness": 42}],
+    [{"powerState": "on"}, {"brightness": -1}],
+], ids=["power-dim", "brightness-negative"])
+def test_govee_cloud_state_rejects_invalid_values(monkeypatch, secrets, properties):
+    monkeypatch.setattr(lights.socket, "socket", StatusSocket)
+    StatusSocket.reply = None
+    monkeypatch.setenv("GOVEE_API_KEY", "key")
+    body = {"code": 200, "data": {"properties": properties}}
+    monkeypatch.setattr(requests, "get", lambda *a, **k: types.SimpleNamespace(raise_for_status=lambda: None,
+                                                                                json=lambda: body))
+    monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
+    assert lights.read_state(GOVEE) == lights.StateReading.failed()
+
+
 def test_govee_unreadable_everywhere_fails_without_raising(monkeypatch, secrets):
     monkeypatch.setattr(lights.GoveeController, "_discover_ips", lambda self, device_ids, timeout=None: {})
     assert lights.read_state(GOVEE) == lights.StateReading.failed()
@@ -387,10 +418,11 @@ class FakeTuyaStatus(types.ModuleType):
     def __init__(self, local=None, cloud=None):
         super().__init__("tinytuya")
         outer = self
-        self.timeouts = []
+        self.timeouts, self.devices = [], []
 
         class OutletDevice:
             def __init__(self, *args):
+                outer.devices.append(args)
                 if isinstance(local, Exception):
                     raise local
 
@@ -444,6 +476,37 @@ def test_tuya_falls_back_to_cloud_status(monkeypatch, secrets):
     install(monkeypatch, local=OSError("unreachable"), cloud=cloud)
     assert lights.read_state(TUYA) == lights.StateReading(True, True, 1, "cloud")
     install(monkeypatch, local=OSError("unreachable"), cloud={"success": False})
+    assert lights.read_state(TUYA) == lights.StateReading.failed()
+
+
+TUYA_CLOUD_ON = {"success": True, "result": [{"code": "switch_1", "value": True}, {"code": "bright_value_v2", "value": 500}]}
+
+
+@pytest.mark.parametrize("cloud_credentials, expected", [
+    (True, lights.StateReading(True, True, 50, "cloud")),
+    (False, lights.StateReading.failed()),
+], ids=["cloud", "no-cloud"])
+def test_tuya_local_read_needs_key_and_ip(monkeypatch, secrets, caplog, cloud_credentials, expected):
+    caplog.set_level(logging.INFO, logger="plex-webhook")
+    secrets["plug1"] = {"ip": "10.0.0.7"}
+    if cloud_credentials:
+        monkeypatch.setenv("TUYA_ACCESS_ID", "id")
+        monkeypatch.setenv("TUYA_ACCESS_KEY", "secret")
+    fake = install(monkeypatch, local={"dps": {"1": True, "3": 500}}, cloud=TUYA_CLOUD_ON)
+    assert lights.read_state(TUYA) == expected
+    assert fake.devices == [] and "state_read_failed" not in caplog.text
+
+
+@pytest.mark.parametrize("where", ["local", "cloud"])
+def test_tuya_non_bool_switch_is_unreadable(monkeypatch, secrets, where):
+    secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.7"}
+    if where == "local":
+        install(monkeypatch, local={"dps": {"1": 1, "3": 500}})
+    else:
+        monkeypatch.setenv("TUYA_ACCESS_ID", "id")
+        monkeypatch.setenv("TUYA_ACCESS_KEY", "secret")
+        cloud = {"success": True, "result": [{"code": "switch_1", "value": 1}, {"code": "bright_value_v2", "value": 500}]}
+        install(monkeypatch, local=OSError("unreachable"), cloud=cloud)
     assert lights.read_state(TUYA) == lights.StateReading.failed()
 
 
