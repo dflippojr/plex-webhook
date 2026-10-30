@@ -333,3 +333,84 @@ def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(audit_db, ca
     exported = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [row["action"] for row in exported] == ["webhook.receipt", "light.result"]
     assert ["detail" in row for row in exported] == [False, True]
+
+
+def test_export_reads_legacy_table_without_detail_column(audit_db, capsys):
+    # A database last written before light records, opened read-only, is never migrated.
+    legacy_schema = audit.SCHEMA.replace("checksum TEXT NOT NULL,\n    detail TEXT", "checksum TEXT NOT NULL")
+    assert legacy_schema != audit.SCHEMA
+    rows = []
+    for action, outcome in (("webhook.receipt", "received"), ("webhook.receipt", "rejected")):
+        row = dict(recorded_at=audit.utc_now(), correlation_id=audit.correlation_id(), source="webhook",
+                   actor_kind="plex_server", actor_id="plex-server", actor_verified=0, action=action,
+                   target_kind="event", target_id="1", outcome=outcome, reason_code="accepted", changed_fields={})
+        row["checksum"] = audit.checksum(row)
+        rows.append(row)
+    with sqlite3.connect(audit_db) as conn:
+        conn.executescript(legacy_schema)
+        conn.executemany(f"INSERT INTO audit_events ({', '.join(audit.RECORD_COLUMNS)}) "
+                         f"VALUES ({', '.join('?' * len(audit.RECORD_COLUMNS))})",
+                         [tuple(json.dumps(row[key]) if key == "changed_fields" else row[key]
+                                for key in audit.RECORD_COLUMNS) for row in rows])
+    assert audit_cli.main(["--db", str(audit_db), "export"]) == 0
+    exported = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["outcome"] for row in exported] == ["received", "rejected"]
+    assert all(set(row) == set(audit_cli.COLUMNS) for row in exported)
+    assert all(row["checksum"] == audit.checksum(row) for row in exported)
+    with sqlite3.connect(audit_db) as conn:
+        assert not audit.has_detail_column(conn)
+
+
+def test_prune_keeps_log_lines_with_naive_timestamps(tmp_path):
+    log = tmp_path / "events.jsonl"
+    naive = json.dumps({"received_at": "2000-01-01T00:00:00", "event": "media.play"}) + "\n"
+    old = json.dumps({"received_at": "2000-01-01T00:00:00+00:00", "event": "media.play"}) + "\n"
+    log.write_text(naive + old, encoding="utf-8")
+    cutoff = (datetime(2026, 10, 16, tzinfo=timezone.utc) - timedelta(days=90)).isoformat(timespec="microseconds")
+    assert audit_cli.prune_event_log(log, cutoff) == (1, 1)
+    assert audit_cli.prune_event_log(log, cutoff, apply=True) == (1, 1)
+    assert log.read_text(encoding="utf-8") == naive
+
+
+def test_failed_log_replace_leaves_log_intact_and_no_temp_file(tmp_path, monkeypatch, capsys):
+    path, log, _, _ = _event_retention_fixture(tmp_path)
+    before = log.read_bytes()
+
+    def fail_replace(*_args):
+        raise OSError("SECRET")
+
+    monkeypatch.setattr(audit_cli.os, "replace", fail_replace)
+    assert audit_cli.main(["--db", str(path), "prune", "--apply"]) == 1
+    assert log.read_bytes() == before
+    assert not (tmp_path / "events.jsonl.prune.tmp").exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "audit_cli_failed: existing readable audit database required\n"
+
+
+def test_prune_without_events_table(tmp_path, monkeypatch):
+    path = tmp_path / "audit-only.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(audit.SCHEMA)
+    now = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)
+    for recorded in (now - timedelta(days=91), now - timedelta(days=1)):
+        monkeypatch.setattr(audit, "utc_now", lambda value=recorded: value.isoformat(timespec="microseconds"))
+        receipt(path)
+    with audit_cli.open_database(path) as conn:
+        result = audit_cli.prune(conn, now=now)
+    assert result["eligible"] == 1 and result["deleted"] == 0
+    assert result["events_eligible"] == result["events_deleted"] == 0
+    with audit_cli.open_database(path, writable=True) as conn:
+        result = audit_cli.prune(conn, apply=True, now=now)
+    assert result["eligible"] == result["deleted"] == 1
+    assert result["events_eligible"] == result["events_deleted"] == 0
+    assert [row["recorded_at"] for row in records(path)] == [(now - timedelta(days=1)).isoformat(timespec="microseconds")]
+
+
+def test_module_entry_point_returns_exit_status(tmp_path):
+    path = tmp_path / "SECRET.db"
+    result = subprocess.run([sys.executable, "-m", "app.audit_cli", "--db", str(path), "list"],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == "audit_cli_failed: existing readable audit database required\n"
+    assert not path.exists()
