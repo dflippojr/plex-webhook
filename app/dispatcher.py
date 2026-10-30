@@ -292,7 +292,7 @@ def _dispatch_lifecycle(room_key, action, context):
     _dispatch(room_key, action, context)
     entries = copy.deepcopy(registry.automations_for(room_key, action))
     # Cleanup includes persisted targets, even if a reload removed their automation.
-    snapshots = {room: (copy.deepcopy(registry.lights_for(room)), dict(registry.settings_for(room)))
+    snapshots = {room: (_lights_snapshot(room), dict(registry.settings_for(room)))
                  for room in registry.rooms}
     blocked = {room for room in snapshots if _active_clients.get(room)}
     # Nothing is audited for automations until they run, so a dropped batch leaves no queued record.
@@ -324,12 +324,10 @@ def _automation_action(source, target, action, snapshots, blocked, context, yiel
         action = "dim"
     action_id = audit.correlation_id()
     if target in blocked:
-        _record(context, "light.action_summary", "skipped", "own_playback_active",
-                target, action, action_id, counts={})
+        _summary(context, "skipped", "own_playback_active", target, action, action_id)
         return
     if yield_to_owner and db.automation_owner(target) not in (None, source):
-        _record(context, "light.action_summary", "skipped", "owned_by_newer_source",
-                target, action, action_id, counts={})
+        _summary(context, "skipped", "owned_by_newer_source", target, action, action_id)
         return
     _record_queued(context, target, action, action_id, room_lights, settings["dim"] if action == "dim" else None)
     _apply(target, action, room_lights, context, action_id, settings, automation_source=source)
@@ -343,7 +341,7 @@ def check_lights(room_key: str) -> Future:
     configured light, or raises CheckDropped when the queue drops the check. A cancelled
     Future (a caller that gave up) is skipped if it has not started yet.
     """
-    room_lights = copy.deepcopy(registry.lights_for(room_key))
+    room_lights = _lights_snapshot(room_key)
     result = Future()
 
     def run():
@@ -396,10 +394,10 @@ def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = N
     def on_drop(reason):
         # The terminal record for a queued action that never ran; no light was touched.
         _dropped(room_key, reason)
-        _record(audit_context, "light.action_summary", "skipped", reason, room_key, action, action_id, counts={})
+        _summary(audit_context, "skipped", reason, room_key, action, action_id)
 
     try:
-        room_lights = copy.deepcopy(registry.lights_for(room_key))
+        room_lights = _lights_snapshot(room_key)
         settings = dict(registry.settings_for(room_key))
     except Exception:
         # Reported by the worker through the same failure path as any other action error.
@@ -409,6 +407,10 @@ def _dispatch(room_key: str, action: str, audit_context: AuditContext | None = N
         _record_queued(audit_context, room_key, action, action_id, room_lights, level)
     return _action_executor.submit(_apply, room_key, action, room_lights, audit_context, action_id, settings,
                                    key=("room", room_key), on_drop=on_drop)
+
+
+def _lights_snapshot(room_key):
+    return copy.deepcopy(registry.lights_for(room_key))
 
 
 def _dropped(room_key, reason):
@@ -436,6 +438,11 @@ def _record(context, name, outcome, reason, target, action, action_id, **detail)
                        target_id=target if isinstance(target, str) and target else None, detail=detail)
     except Exception:
         logger.warning("reason=audit_write_failed")
+
+
+def _summary(context, outcome, reason, target, action, action_id):
+    """A terminal record for an action that touched no light."""
+    _record(context, "light.action_summary", outcome, reason, target, action, action_id, counts={})
 
 
 def _summarize(results):
@@ -496,23 +503,20 @@ def _dim(room_key, room_lights, settings, context, action_id):
     for light in room_lights:
         light_id = _text(light.get("id"))
         existing = db.get_restore_record(room_key, light_id)
+        reading = None if existing else lights.read_state(light)
+        if existing["was_off"] if existing else reading.ok and not reading.on:
+            if not existing:
+                db.put_restore_record(room_key, light_id, True, None, dim)
+            _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
+            results.append(lights.skipped_result(light, "light_off"))
+            continue
         if existing:  # a re-dim before the pending restore ran keeps the original value
-            if existing["was_off"]:
-                _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
-                results.append(lights.skipped_result(light, "light_off"))
-                continue
             _decide(context, room_key, light, "dim", action_id, "dim_kept_original", "record_exists", settings,
                     existing["restore_percent"])
             # A newer automation or the target's own playback changes the expected level,
             # while preserving the brightness from before the first dim.
             db.put_restore_record(room_key, light_id, False, existing["restore_percent"], dim)
             targets.append(light)
-            continue
-        reading = lights.read_state(light)
-        if reading.ok and not reading.on:
-            db.put_restore_record(room_key, light_id, True, None, dim)
-            _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
-            results.append(lights.skipped_result(light, "light_off"))
             continue
         restore, reason = (reading.brightness, "read_ok") if reading.ok else (settings["restore"], "read_failed")
         if restore == dim:  # a stored value equal to the dim level could never undo the dim
@@ -576,8 +580,7 @@ def _apply(room_key: str, action: str, room_lights=None, audit_context=None, act
         # Also check at execution: a queued automation must yield to playback that
         # started while an earlier light command was still running.
         if automation_source is not None and _active_clients.get(room_key):
-            _record(audit_context, "light.action_summary", "skipped", "own_playback_active",
-                    room_key, action, action_id, counts={})
+            _summary(audit_context, "skipped", "own_playback_active", room_key, action, action_id)
             return
         if action in ("dim", "restore"):
             db.set_automation_owner(room_key, automation_source if action == "dim" else None)
@@ -592,8 +595,7 @@ def _apply(room_key: str, action: str, room_lights=None, audit_context=None, act
         logger.info("room=%s action=%s lights=%d", room_key, action, len(room_lights))
     except Exception:
         logger.error("reason=dispatcher_action_failed operation=apply action=%s", lights.diagnostic_action(action))
-        _record(audit_context, "light.action_summary", "failed", "dispatcher_error", room_key, action, action_id,
-                counts={})
+        _summary(audit_context, "failed", "dispatcher_error", room_key, action, action_id)
         return
     if not isinstance(results, list):
         results = None  # a backend that reports nothing proves nothing
