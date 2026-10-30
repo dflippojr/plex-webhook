@@ -159,6 +159,28 @@ def test_stop_by_title_restores_after_uuid_play(registry, light_calls, clock):
     assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
+@pytest.mark.parametrize("event", ["media.stop", "media.pause"])
+def test_title_matched_plays_with_unlisted_uuids_keep_one_entry(registry, light_calls, clock, event):
+    labels = {"room": "living_room"}
+    for n in range(3):
+        send("media.play", uuid=f"synthetic-forged-{n}")
+    assert list(dispatcher._active_clients["living_room"]) == ["Living Room TV"]
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 1
+    send(event, uuid="uuid-living")
+    assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+
+
+def test_uuid_stop_restores_after_the_client_title_is_renamed(registry, rooms_file, light_calls, clock):
+    labels = {"room": "living_room"}
+    send("media.play", uuid="uuid-living")
+    rooms_file.write_text(ROOMS_YAML.replace("title: Living Room TV", "title: Synthetic Renamed TV"), encoding="utf-8")
+    registry.reload()
+    send("media.stop", title="Synthetic Renamed TV", uuid="uuid-living")
+    assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
+    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+
+
 def test_expiry_restore_is_audited_as_playback_expiry(client, light_calls, clock):
     import app.main as main
 
