@@ -104,6 +104,35 @@ def test_non_result_from_apply_is_unconfirmed(cls, brand, light, first, try_firs
 
 
 @pytest.mark.parametrize("cls,brand,light,first,try_first,read_first", BRANDS)
+def test_truthy_legacy_step_result_is_unconfirmed(cls, brand, light, first, try_first, read_first, monkeypatch):
+    controller = cls()
+    monkeypatch.setattr(controller, try_first, lambda *args: True)
+    monkeypatch.setattr(controller, "_try_cloud", _boom)
+    result = controller.apply("dim", light)
+    assert result.attempts == (lights.Attempt(first, "unconfirmed", "result_unconfirmed"),)
+    assert (result.brand, result.transport, result.outcome, result.reason) == (
+        brand, first, "unconfirmed", "result_unconfirmed")
+
+
+def test_apply_action_survives_a_raising_controller(monkeypatch):
+    own = lights.LightResult("fake", "l2", "lan", "none", "command_sent", "lan_command_sent")
+    calls = []
+
+    class RaisesOnFirstLight:
+        def apply(self, action, light, brightness=None, turn_on=True):
+            calls.append((action, light["id"], brightness))
+            if light["id"] == "l1":
+                _boom()
+            return own
+
+    monkeypatch.setitem(lights._controllers, "fake", RaisesOnFirstLight())
+    first, second = lights.apply_action("dim", [{"brand": "fake", "id": "l1"}, {"brand": "fake", "id": "l2"}], 30)
+    assert calls == [("dim", "l1", 30), ("dim", "l2", 30)]
+    assert (first.brand, first.target_id, first.outcome, first.reason) == ("fake", "l1", "failed", "unexpected_error")
+    assert second is own
+
+
+@pytest.mark.parametrize("cls,brand,light,first,try_first,read_first", BRANDS)
 def test_read_state_returns_the_first_ok_transport(cls, brand, light, first, try_first, read_first,
                                                    monkeypatch, caplog):
     controller = cls()

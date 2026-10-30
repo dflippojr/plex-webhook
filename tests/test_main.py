@@ -1,6 +1,8 @@
+import asyncio
 import importlib
 import json
 import sqlite3
+import types
 
 import pytest
 from prometheus_client import REGISTRY
@@ -332,6 +334,30 @@ def test_oversized_content_length_is_413_and_stores_nothing(client, light_calls)
     assert _rejected("body_too_large") == before + 1
     drain()
     assert light_calls == []
+
+
+def test_body_limiter_passes_non_request_messages(monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 10)
+    # The disconnect carries a body only so that counting it would trip the cap.
+    disconnect = {"type": "http.disconnect", "body": b"x" * 100}
+    messages = [{"type": "http.request", "body": b"x" * 6}, disconnect,
+                {"type": "http.request", "body": b"x" * 4}, {"type": "http.request", "body": b"x"}]
+    source = iter(messages)
+
+    async def receive():
+        return next(source)
+
+    request = types.SimpleNamespace(_receive=receive)
+    main._limit_streamed_body(request)
+
+    async def read():
+        return [await request._receive() for _ in range(3)]
+
+    assert asyncio.run(read()) == messages[:3]
+    with pytest.raises(main._BodyTooLarge):  # the cap still counts the request messages
+        asyncio.run(request._receive())
 
 
 def test_streamed_body_over_cap_without_content_length_is_413(client, monkeypatch):
