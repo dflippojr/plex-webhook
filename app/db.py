@@ -61,12 +61,25 @@ def get_connection():
     return conn
 
 
+# Payload values insert_event stores, as (group, field names), in the order of their
+# events columns below. main's payload validation guards every value listed here.
+STORED_FIELDS = (
+    ("Account", ("title",)),
+    ("Player", ("title", "uuid")),
+    ("Metadata", ("type", "title", "grandparentTitle", "ratingKey")),
+)
+
+
+def stored_values(payload):
+    """The STORED_FIELDS values of a payload, in table order; missing groups and fields are None."""
+    for group, names in STORED_FIELDS:
+        fields = (payload or {}).get(group) or {}
+        for name in names:
+            yield fields.get(name)
+
+
 def insert_event(conn, received_at, event, payload, raw_payload_json, raw_truncated=False):
     with WRITE_LOCK:
-        metadata = (payload or {}).get("Metadata") or {}
-        account = (payload or {}).get("Account") or {}
-        player = (payload or {}).get("Player") or {}
-
         cursor = conn.execute(
             """
             INSERT INTO events (
@@ -74,19 +87,7 @@ def insert_event(conn, received_at, event, payload, raw_payload_json, raw_trunca
                 media_type, title, grandparent_title, rating_key, raw_payload, raw_truncated
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                received_at,
-                event,
-                account.get("title"),
-                player.get("title"),
-                player.get("uuid"),
-                metadata.get("type"),
-                metadata.get("title"),
-                metadata.get("grandparentTitle"),
-                metadata.get("ratingKey"),
-                raw_payload_json,
-                1 if raw_truncated else 0,
-            ),
+            (received_at, event, *stored_values(payload), raw_payload_json, 1 if raw_truncated else 0),
         )
         conn.commit()
         return cursor.lastrowid
