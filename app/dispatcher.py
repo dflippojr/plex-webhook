@@ -504,7 +504,8 @@ def _dim(room_key, room_lights, settings, context, action_id):
         light_id = _text(light.get("id"))
         existing = db.get_restore_record(room_key, light_id)
         reading = None if existing else lights.read_state(light)
-        if existing["was_off"] if existing else reading.ok and not reading.on:
+        was_off = existing["was_off"] if existing else reading.ok and not reading.on
+        if was_off:
             if not existing:
                 db.put_restore_record(room_key, light_id, True, None, dim)
             _decide(context, room_key, light, "dim", action_id, "dim_skipped_off", "was_off", settings)
