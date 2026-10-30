@@ -75,6 +75,12 @@ def commands(fake):
             if msg["msg"]["cmd"] != "scan"]
 
 
+@pytest.mark.parametrize("value,expected", [("abc", 2.0), ("0", 2.0), ("31", 2.0), ("5", 5.0)])
+def test_read_timeout_env_falls_back_on_bad_values(monkeypatch, value, expected):
+    monkeypatch.setenv("LIGHT_READ_TIMEOUT_S", value)
+    assert lights._read_timeout() == expected
+
+
 # --- Govee ---------------------------------------------------------------------
 
 
@@ -244,6 +250,23 @@ def test_govee_discovery_oserror_is_swallowed(monkeypatch):
     monkeypatch.setattr(lights.socket, "socket", broken)
     lights.GoveeController().apply("dim", GOVEE)
     assert lights.GoveeController()._discover_ip(None) is None
+
+
+@pytest.mark.parametrize("device_id", [7, ""])
+def test_govee_without_usable_id_skips_lan(fake_socket, device_id):
+    result = lights.GoveeController().apply("dim", {"brand": "govee", "id": device_id})
+    assert fake_socket.instances == []
+    assert result.attempts[0] == lights.Attempt("lan", "skipped", "no_address")
+
+
+def test_govee_cloud_without_requests_is_skipped(fake_socket, monkeypatch, caplog):
+    monkeypatch.setenv("GOVEE_API_KEY", "key")
+    monkeypatch.setitem(sys.modules, "requests", None)  # makes `import requests` raise ImportError
+    with caplog.at_level(logging.WARNING, logger="plex-webhook"):
+        result = lights.GoveeController().apply("dim", GOVEE)
+    assert result.attempts[-1] == lights.Attempt("cloud", "skipped", "library_unavailable", "environment")
+    assert (result.transport, result.outcome, result.reason) == ("cloud", "skipped", "library_unavailable")
+    assert "'requests' package not available" in caplog.text
 
 
 def test_govee_unexpected_error_is_caught(monkeypatch, caplog):
@@ -500,6 +523,20 @@ def test_bind_oserror_closes_the_socket(fake_socket, monkeypatch, secrets):
     assert all(not s.sent for s in fake_socket.instances)
 
 
+def test_discover_ips_empty_and_bind_failure(fake_socket, monkeypatch, caplog):
+    assert lights.GoveeController()._discover_ips([]) == {}
+    assert fake_socket.instances == []
+
+    def bind(self, *args):
+        raise OSError("address in use")
+
+    monkeypatch.setattr(fake_socket, "bind", bind)
+    with caplog.at_level(logging.INFO, logger="plex-webhook"):
+        assert lights.GoveeController()._discover_ips(["AA:BB"]) == {}
+    assert caplog.text.count("reason=discovery_failed") == 1
+    assert len(fake_socket.instances) == 1 and fake_socket.instances[0].closed
+
+
 def test_batch_scan_matches_each_reply_to_its_own_device(fake_socket):
     fake_socket.replies = [scan_reply("G1", "10.0.0.9"), scan_reply("OTHER", "10.0.0.9"), scan_reply("G0", "10.0.0.9")]
     assert lights.GoveeController()._discover_ips(["G0", "G1", "G2"]) == {"G0": "10.0.0.9", "G1": "10.0.0.9"}
@@ -532,7 +569,7 @@ def test_prepare_never_raises(monkeypatch, caplog):
 
 
 class FakeTinytuya(types.ModuleType):
-    def __init__(self, local_fails=False, cloud_fails=False):
+    def __init__(self, local_fails=False, cloud_fails=False, local_returns=(None, None)):
         super().__init__("tinytuya")
         self.log = []
         outer = self
@@ -551,9 +588,11 @@ class FakeTinytuya(types.ModuleType):
 
             def turn_on(self):
                 outer.log.append(("turn_on",))
+                return local_returns[0]
 
             def set_value(self, dp, value):
                 outer.log.append(("set_value", dp, value))
+                return local_returns[1]
 
         class Cloud:
             def __init__(self, **kwargs):
@@ -578,6 +617,21 @@ def test_tuya_local(monkeypatch, secrets):
     fake = install_tinytuya(monkeypatch)
     lights.TuyaController().apply("dim", TUYA)
     assert fake.log == [("local", "plug1", "10.0.0.5", "k"), ("turn_on",), ("set_value", 3, 200)]
+
+
+@pytest.mark.parametrize("turn,level", [
+    ({}, {}),
+    ({"t": 1}, {"t": 1}),
+    ({"dps": {"1": True}}, {}),
+    ({}, {"dps": {"3": 200}}),
+])
+def test_tuya_empty_dict_return_is_unconfirmed(monkeypatch, secrets, turn, level):
+    secrets["plug1"] = {"local_key": "k", "ip": "10.0.0.5"}
+    fake = install_tinytuya(monkeypatch, local_returns=(turn, level))
+    result = lights.TuyaController().apply("dim", TUYA)
+    assert fake.log[1:] == [("turn_on",), ("set_value", 3, 200)]
+    assert (result.transport, result.outcome, result.reason) == ("local", "unconfirmed", "result_unconfirmed")
+    assert result.progress == ("turn", "brightness")
 
 
 def test_tuya_falls_back_to_cloud(monkeypatch, secrets):
