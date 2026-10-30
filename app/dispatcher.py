@@ -143,6 +143,10 @@ _clock = time.monotonic
 # room_key -> {client identifier: clock time after which its play is presumed over}
 _active_clients: dict[str, dict[str, float]] = {}
 
+# room_key -> the unlisted uuid of the latest title-matched play, which may also end the room's playback.
+# One per room, dropped when the room's playback ends.
+_activating_uuids: dict[str, str] = {}
+
 # Webhook handling and the expiry sweep both change player state.
 _state_lock = threading.RLock()
 
@@ -243,6 +247,7 @@ def expire_idle_clients(context_factory: Callable | None = None):
             _set_room_gauge(room_key, active)
             logger.info("room=%s reason=playback_expired players=%d", room_key, len(stale))
             if not active:
+                _activating_uuids.pop(room_key, None)
                 _pending_rooms.discard(room_key)
                 _dispatch_lifecycle(room_key, "restore", context_factory() if context_factory else None)
 
@@ -255,25 +260,35 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
     if event not in ACTIVATE_EVENTS and event not in DEACTIVATE_EVENTS:
         return
 
-    room_key = registry.resolve_room(payload)
-    if room_key is None:
+    match = registry.match_player(payload)
+    if match is None:
         logger.debug("event=%s from unmapped client, ignoring", event)
         return
+    room_key = match.room
     if event in ACTIVATE_EVENTS and not registry.dims_for(room_key, payload):
         # Pause and stop are never filtered, so this option can never leave a room dimmed.
         logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
         return
 
-    client_id = _client_id(payload)
+    player_uuid = payload["Player"].get("uuid")
     with _state_lock:
         active = _active_clients.setdefault(room_key, {})
         was_active = len(active) > 0
 
+        # A room has one player, which may arrive by uuid or by title alone: it keeps one entry, under the
+        # room's client label, and a stop or pause from it ends the room's playback whatever the label was.
+        # An unlisted uuid ends it only if it made the room's latest title-matched play.
         if event in ACTIVATE_EVENTS:
             # Every play/resume pushes the expiry out again.
-            active[client_id] = _expires_at(payload, _clock())
-        else:
-            active.pop(client_id, None)
+            active.clear()
+            active[match.label] = _expires_at(payload, _clock())
+            if not match.configured:
+                _activating_uuids[room_key] = player_uuid
+            elif player_uuid:  # the listed player took the room over
+                _activating_uuids.pop(room_key, None)
+        elif match.configured or _activating_uuids.get(room_key) == player_uuid:
+            active.clear()
+            _activating_uuids.pop(room_key, None)
 
         is_active = len(active) > 0
         _set_room_gauge(room_key, active)

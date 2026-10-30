@@ -16,6 +16,14 @@ DEFAULT_PLAYBACK_IDLE_MINUTES = 6 * 60
 MAX_PLAYBACK_IDLE_MINUTES = 7 * 24 * 60
 
 
+class PlayerMatch(NamedTuple):
+    """A payload's player resolved to its room; see ``RoomRegistry.match_player``."""
+
+    room: str
+    label: str
+    configured: bool
+
+
 class RoomState(NamedTuple):
     """One validated configuration, published as a single reference."""
 
@@ -264,6 +272,11 @@ def _resolve(state: RoomState, uuid, title) -> str | None:
     return None
 
 
+def _client_label(state: RoomState, room: str) -> str:
+    """The room's configured client title, or the room key when that client has no title."""
+    return (state.rooms[room]["plex_clients"][0].get("title") or "").strip() or room
+
+
 class RoomRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
@@ -316,7 +329,22 @@ class RoomRegistry:
         room = _resolve(state, uuid if isinstance(uuid, str) else None, title if isinstance(title, str) else None)
         if room is None:
             return None
-        return (state.rooms[room]["plex_clients"][0].get("title") or "").strip() or room
+        return _client_label(state, room)
+
+    def match_player(self, payload: dict) -> PlayerMatch | None:
+        """The room this payload's player resolves to, with that room's one client label, from one snapshot.
+
+        ``configured`` is False for a matching title carrying a uuid the room does not list: a stop or pause
+        from it may be another device that shares the title, so it must not end the room's playback.
+        """
+        player = (payload or {}).get("Player") or {}
+        uuid = player.get("uuid")
+        state = self._state
+        room = _resolve(state, uuid, player.get("title"))
+        if room is None:
+            return None
+        listed = state.rooms[room]["plex_clients"][0].get("uuid")
+        return PlayerMatch(room, _client_label(state, room), not (uuid and listed and uuid != listed))
 
     def playback_idle_seconds(self) -> int:
         return self._state.options["playback_idle_minutes"] * 60
