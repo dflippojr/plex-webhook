@@ -1,10 +1,12 @@
 [run]
+branch = True
 relative_files = True
 
 [report]
-# Minimum line coverage of app/ (percent) for `pytest --cov=app`, locally and
-# in CI. Measured 97.61% (1716 of 1758 lines) on 2026-10-29 with Python 3.12,
-# so the floor sits just below it. The floor only goes up: raise it when
-# coverage rises, never lower it to get a change through.
-fail_under = 97
+# Minimum combined line and branch coverage of app/ (percent) for
+# `pytest --cov=app`, locally and in CI. Measured 99.79% (2339 of 2344
+# statements and branch arcs) on 2026-10-30 with Python 3.12, so the floor
+# sits just below it. The floor only goes up: raise it when coverage rises,
+# never lower it to get a change through.
+fail_under = 99.78
 precision = 2
