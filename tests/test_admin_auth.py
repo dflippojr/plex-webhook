@@ -99,6 +99,23 @@ def test_denial_audit_is_bounded_and_counted(anon, monkeypatch):
     assert SENTINEL not in metrics and ADMIN_TOKEN not in metrics
 
 
+def test_denial_audit_window_resets_after_a_minute(monkeypatch):
+    # Pins the clock so the reset runs whatever the host's uptime is; a runner
+    # booted under a minute ago never reaches the reset otherwise.
+    import types
+    import app.main as main
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(main, "DENIAL_AUDIT_LIMIT", 2)
+    monkeypatch.setitem(main._denial_window, "start", 0.0)
+    monkeypatch.setitem(main._denial_window, "count", 0)
+    assert [main._denial_audit_allowed() for _ in range(3)] == [True, True, False]
+    clock["now"] += main.DENIAL_AUDIT_WINDOW - 1
+    assert main._denial_audit_allowed() is False
+    clock["now"] += 1
+    assert main._denial_audit_allowed() is True
+
+
 def test_credentials_never_logged(anon, caplog):
     anon.get("/rooms", headers={"Authorization": f"Bearer {SENTINEL}"})
     anon.get("/rooms", headers=anon.admin)
