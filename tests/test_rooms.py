@@ -4,23 +4,28 @@ import pytest
 from app.rooms import EMPTY_STATE, PlayerMatch, RoomConfigError, RoomConfigUnavailable, RoomRegistry
 
 
+def _room(registry, event_payload):
+    match = registry.match_player(event_payload)
+    return match.room if match else None
+
+
 def test_resolves_by_uuid(registry):
-    assert registry.resolve_room(payload("media.play", title="whatever", uuid="uuid-living")) == "living_room"
+    assert _room(registry, payload("media.play", title="whatever", uuid="uuid-living")) == "living_room"
 
 
 def test_resolves_by_title_case_and_whitespace_insensitive(registry):
-    assert registry.resolve_room(payload("media.play", title="BEDROOM apple tv")) == "bedroom"
-    assert registry.resolve_room(payload("media.play", title="  living room tv ")) == "living_room"
+    assert _room(registry, payload("media.play", title="BEDROOM apple tv")) == "bedroom"
+    assert _room(registry, payload("media.play", title="  living room tv ")) == "living_room"
 
 
 def test_uuid_wins_over_title(registry):
-    assert registry.resolve_room(payload("media.play", title="Living Room TV", uuid="uuid-bed-tv")) == "bedroom"
+    assert _room(registry, payload("media.play", title="Living Room TV", uuid="uuid-bed-tv")) == "bedroom"
 
 
 def test_unknown_or_missing_player(registry):
-    assert registry.resolve_room(payload("media.play", title="Kitchen")) is None
-    assert registry.resolve_room({}) is None
-    assert registry.resolve_room(None) is None
+    assert _room(registry, payload("media.play", title="Kitchen")) is None
+    assert _room(registry, {}) is None
+    assert _room(registry, None) is None
 
 
 def test_match_player_labels_the_room_client_whichever_identifier_arrives(registry):
@@ -58,7 +63,7 @@ def test_missing_startup_config_disables_dispatcher(tmp_path):
 
     reg = RoomRegistry(tmp_path / "absent.yaml")
     assert reg.rooms == {}
-    assert reg.resolve_room(payload("media.play")) is None
+    assert _room(reg, payload("media.play")) is None
 
 
 
@@ -114,8 +119,8 @@ def test_invalid_candidate_preserves_mapping(registry, rooms_file, source, path,
         assert error.value.detail == [{"path": path, "code": code}]
         assert "private-value" not in str(error.value.detail)
         assert registry._state is before
-        assert registry.resolve_room(payload("media.play", uuid="uuid-living")) == "living_room"
-        assert registry.resolve_room(payload("media.play", title=" Bedroom Apple TV ")) == "bedroom"
+        assert _room(registry, payload("media.play", uuid="uuid-living")) == "living_room"
+        assert _room(registry, payload("media.play", title=" Bedroom Apple TV ")) == "bedroom"
 
 
 @pytest.mark.parametrize("field,first,second", [("uuid", "private-value", "private-value"), ("title", "Private-Value", " private-value ")])
@@ -151,7 +156,7 @@ def test_optional_fields_extensions_and_repetition(rooms_file):
       - {brand: unsupported, id: fake-light, name: null, model: null, extra: preserved}
 ''', encoding="utf-8")
     reg = RoomRegistry(rooms_file)
-    assert reg.resolve_room(payload("media.play", title="tv")) == "den"
+    assert _room(reg, payload("media.play", title="tv")) == "den"
     assert reg.rooms["den"]["extension"] == "preserved"
     assert reg.lights_for("den")[0]["extra"] == "preserved"
 
@@ -172,7 +177,7 @@ rooms:
     plex_clients: [{title: TV}]
 ''', encoding="utf-8")
     reg = RoomRegistry(rooms_file)
-    assert reg.resolve_room(payload("media.play", title="tv")) == "den"
+    assert _room(reg, payload("media.play", title="tv")) == "den"
     assert reg.lights_for("den")[0]["id"] == "fake-light"
 
 
