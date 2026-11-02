@@ -264,14 +264,14 @@ rooms:
 values that dim the room, matched trimmed and case-insensitive (Plex sends
 `movie`, `episode`, `track`, `photo` and `clip` among others; any string is
 accepted). A `media.play`/`media.resume` of another type, or with no
-`Metadata.type`, is ignored for dispatch: it does not mark the player active, set
-an expiry or trigger automations, though it is still stored, counted in
+`Metadata.type`, never dims the room: it does not mark the player active, set an
+expiry or trigger dim automations, though it is still stored, counted in
 `plex_webhook_events_total` and audited as `webhook.receipt` `received/accepted`.
-`media.pause` and `media.stop` are never filtered, and a filtered play or resume
-from the player that dimmed the room ends its playback just as a stop would, so
-switching from a film to music on the same player restores the room and leaves it
-restored, whether or not Plex sends a stop between the two. An empty list is
-rejected on validate/reload.
+With no playback in the room it dispatches nothing. From the player that dimmed the
+room it ends that playback as a stop would, restore automations included, and
+`media.pause` and `media.stop` are never filtered, so switching from a film to music
+on the same player restores the room and leaves it restored, whether or not Plex
+sends a stop between the two. An empty list is rejected on validate/reload.
 
 **One room per Plex player, and lights are not shared.** A room's `plex_clients`
 must hold exactly one entry, and a light `id` may appear in only one room. Several
