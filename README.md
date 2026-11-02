@@ -587,17 +587,6 @@ in [SonarCloud](https://sonarcloud.io/project/overview?id=dflippojr_plex-webhook
 Adding a secret alone does not publish analysis; rerun the affected workflow.
 CI configuration changes need no live-stack commands or container restart.
 
-### Optional: local SonarQube (tower)
-
-`sonar-project.properties` is set up for a tower-local SonarQube instance
-(project key `plex-webhook`). To scan from the tower:
-
-```powershell
-D:\Docker\sonarqube\scan.ps1 -Path D:\Docker\plex-webhook -ProjectKey plex-webhook
-```
-
-See `D:\Docker\sonarqube\README.md`.
-
 ## Container constraints
 
 The base image is digest-pinned and installs only hash-verified wheels; no C
@@ -614,10 +603,11 @@ memory and one CPU. A Python standard-library healthcheck calls the existing
 timeout, 20-second startup grace, three failures before unhealthy). Docker
 reports health status; the restart policy does not restart an unhealthy process.
 
-The owner applies this change on the tower after merging:
+The owner applies this change on the production host after merging, from the
+repository checkout (replace `/path/to/plex-webhook` with that path):
 
-```powershell
-Set-Location D:\Docker\plex-webhook
+```sh
+cd /path/to/plex-webhook
 git switch master
 git pull --ff-only
 docker compose config --quiet
@@ -625,7 +615,7 @@ docker compose build plex-webhook
 docker compose up -d --no-deps plex-webhook
 docker compose ps plex-webhook
 docker inspect --format '{{.State.Health.Status}}' plex-webhook
-curl.exe --fail http://127.0.0.1:9800/health
+curl --fail http://127.0.0.1:9800/health
 ```
 
 Allow up to one minute for health to become healthy. Keep the existing `.env`,
