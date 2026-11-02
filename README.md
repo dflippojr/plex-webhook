@@ -11,8 +11,7 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
 
 The next planned steps are those three hardware checks; they need the owner's devices
-and accounts. Other open issues (for example #13, #42) cover deployment and per-room
-brightness.
+and accounts.
 
 ## Run
 
