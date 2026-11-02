@@ -86,9 +86,9 @@ http://127.0.0.1:9800/webhook
 Missing or wrong credentials return 401; an unset or shorter-than-16-character
 `ADMIN_API_TOKEN` fails closed with 503 `{"detail":"Admin authentication
 unavailable"}`. The token is only read from the environment, compared in
-constant time, and never logged or audited. The examples below read the token from the
-`ADMIN_API_TOKEN` shell variable; `set -a; . ./.env; set +a` exports it from
-`.env`. Example:
+constant time, and never logged or audited. The examples below read the token
+from the `ADMIN_API_TOKEN` shell variable; `set -a; . ./.env; set +a` exports
+it from `.env`. Example:
 
 ```sh
 curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
