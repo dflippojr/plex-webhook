@@ -15,16 +15,19 @@ and accounts.
 
 ## Run
 
-```
+Run these from the repository root on the Linux host. The container runs as an
+unprivileged user (uid 10001), so `./data` must be writable by that uid. Docker
+creates a missing bind-mount directory owned by root, so hand it over once,
+before the first start:
+
+```sh
+mkdir -p data
+sudo chown -R 10001 data
 docker compose up -d --build
 ```
 
 Binds to `127.0.0.1:9800` only (loopback) since Plex Media Server runs on
 the same host — no need to expose this beyond localhost.
-
-The container runs as an unprivileged user (uid 10001), so `./data` must
-be writable by it. Docker Desktop bind mounts on Windows already are; on a
-Linux host, run `sudo chown -R 10001 data` once.
 
 Dependencies install from `requirements.lock`, which locks every
 transitive package with hashes. After editing the direct pins in
@@ -83,10 +86,12 @@ http://127.0.0.1:9800/webhook
 Missing or wrong credentials return 401; an unset or shorter-than-16-character
 `ADMIN_API_TOKEN` fails closed with 503 `{"detail":"Admin authentication
 unavailable"}`. The token is only read from the environment, compared in
-constant time, and never logged or audited. Example:
+constant time, and never logged or audited. The examples below read the token from the
+`ADMIN_API_TOKEN` shell variable; `set -a; . ./.env; set +a` exports it from
+`.env`. Example:
 
-```powershell
-curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
+```sh
+curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
 ```
 
 What this establishes: the caller holds the shared secret (`owner-admin` is a
@@ -276,10 +281,10 @@ Workflow to fill it in: play something on the target device, hit
 `GET /clients` (admin token) to read off its real `title`/`uuid`, add it under the right
 room in the local `config/rooms.yaml`, then validate and reload:
 
-```powershell
-curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/validate
+```sh
+curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/validate
 # Only after validation returns 200 with status "valid":
-curl.exe -X POST -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
+curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/reload
 ```
 
 Fix any reported errors and validate again before reloading. Do not
@@ -287,8 +292,8 @@ commit that file.
 
 Then check that each light answers, and over which path, without playing anything:
 
-```powershell
-curl.exe -H "Authorization: Bearer $env:ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/living_room/lights
+```sh
+curl -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/rooms/living_room/lights
 ```
 
 ### Checking a room's lights
