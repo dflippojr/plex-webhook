@@ -265,20 +265,23 @@ def handle_event(payload: dict, audit_context: AuditContext | None = None):
         logger.debug("event=%s from unmapped client, ignoring", event)
         return
     room_key = match.room
-    if event in ACTIVATE_EVENTS and not registry.dims_for(room_key, payload):
-        # Pause and stop are never filtered, so this option can never leave a room dimmed.
-        logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
-        return
+    activates = event in ACTIVATE_EVENTS and registry.dims_for(room_key, payload)
 
     player_uuid = payload["Player"].get("uuid")
     with _state_lock:
+        if event in ACTIVATE_EVENTS and not activates and not _active_clients.get(room_key):
+            logger.debug("event=%s media type not in the room's dim_media_types, ignoring", event)
+            return
+
         active = _active_clients.setdefault(room_key, {})
         was_active = len(active) > 0
 
         # A room has one player, which may arrive by uuid or by title alone: it keeps one entry, under the
         # room's client label, and a stop or pause from it ends the room's playback whatever the label was.
-        # An unlisted uuid ends it only if it made the room's latest title-matched play.
-        if event in ACTIVATE_EVENTS:
+        # An unlisted uuid ends it only if it made the room's latest title-matched play. A filtered play or
+        # resume ends playback the same way: the player moved on from the item that dimmed the room, even
+        # if Plex sends no stop between queue items.
+        if activates:
             # Every play/resume pushes the expiry out again.
             active.clear()
             active[match.label] = _expires_at(payload, _clock())

@@ -13,10 +13,12 @@ automations:
     target_room: bedroom
     action: 40
 """
+DIMMED = [("dim", ["AA:BB"]), ("dim", ["plug1"])]
+RESTORED = [*DIMMED, ("restore", ["AA:BB"]), ("restore", ["plug1"])]
 
 
-def event(name, media_type="movie", title="Living Room TV"):
-    body = payload(name, title)
+def event(name, media_type="movie", title="Living Room TV", uuid=None):
+    body = payload(name, title, uuid)
     if media_type is None:
         del body["Metadata"]["type"]
     else:
@@ -84,6 +86,95 @@ def test_film_then_music_ends_restored(movies_only, light_calls):
     event("media.play", "track")
     assert light_calls == [("dim", ["AA:BB"]), ("dim", ["plug1"]), ("restore", ["AA:BB"]), ("restore", ["plug1"])]
     assert dispatcher._active_clients == {"living_room": {}}
+
+
+def active_sessions(room="living_room"):
+    return REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", {"room": room})
+
+
+@pytest.mark.parametrize("name", ["media.play", "media.resume"])
+@pytest.mark.parametrize("media_type", ["track", "photo", None, 42])
+def test_filtered_play_right_after_film_restores_at_once(movies_only, light_calls, name, media_type):
+    event("media.play", "movie", uuid="uuid-living")
+    event(name, media_type, uuid="uuid-living")
+    assert light_calls == RESTORED
+    assert dispatcher._active_clients == {"living_room": {}}
+    assert dispatcher._pending_rooms == set()
+    assert active_sessions() == 0
+
+
+def test_title_only_filtered_play_right_after_film_restores(movies_only, light_calls):
+    event("media.play", "movie")
+    event("media.play", "track")
+    assert light_calls == RESTORED
+
+
+def test_later_events_after_the_switch_dispatch_nothing_more(movies_only, light_calls, monkeypatch):
+    event("media.play", "movie", uuid="uuid-living")
+    event("media.play", "track", uuid="uuid-living")
+    event("media.stop", "movie", uuid="uuid-living")  # a stop that arrives after the next item's play
+    event("media.play", "track", uuid="uuid-living")
+    event("media.stop", "track", uuid="uuid-living")
+    monkeypatch.setattr(dispatcher, "_clock", lambda: float("inf"))
+    dispatcher.expire_idle_clients()
+    drain()
+    assert light_calls == RESTORED
+
+
+def test_film_after_the_switch_dims_again(movies_only, light_calls):
+    for media_type in ("movie", "track", "movie"):
+        event("media.play", media_type, uuid="uuid-living")
+    assert light_calls == [*RESTORED, *DIMMED]
+    assert active_sessions() == 1
+
+
+def test_unlisted_player_switching_to_music_ends_its_own_film(movies_only, light_calls):
+    event("media.play", "movie", uuid="synthetic-unlisted")
+    event("media.play", "track", uuid="synthetic-unlisted")
+    assert light_calls == RESTORED
+    assert dispatcher._activating_uuids == {}
+
+
+@pytest.mark.parametrize("film_uuid", ["uuid-living", "synthetic-unlisted"])
+def test_filtered_play_from_another_device_sharing_the_title_changes_nothing(movies_only, light_calls, film_uuid):
+    event("media.play", "movie", uuid=film_uuid)
+    before = dict(dispatcher._active_clients["living_room"])
+    event("media.play", "track", uuid="synthetic-other-device")
+    assert light_calls == DIMMED
+    assert dispatcher._active_clients["living_room"] == before
+    assert active_sessions() == 1
+    event("media.stop", "movie", uuid=film_uuid)
+    assert light_calls == RESTORED
+
+
+def test_filtered_play_with_records_but_no_active_entry_dispatches_nothing(movies_only, light_calls):
+    # After a restart the dim's records survive with no player state: only a stop or pause restores then.
+    dispatcher._pending_rooms.add("living_room")
+    event("media.play", "track", uuid="uuid-living")
+    assert light_calls == []
+    assert dispatcher._active_clients == {}
+    assert dispatcher._pending_rooms == {"living_room"}
+    event("media.stop", "track", uuid="uuid-living")
+    assert dispatcher._pending_rooms == set()
+
+
+def test_room_without_the_option_stays_dimmed_from_film_to_music(movies_only, light_calls):
+    event("media.play", "movie", title="Bedroom Apple TV", uuid="uuid-bed-tv")
+    event("media.play", "track", title="Bedroom Apple TV", uuid="uuid-bed-tv")
+    assert light_calls == [("dim", ["plug1"])]
+    assert active_sessions("bedroom") == 1
+
+
+def test_switch_restore_runs_automations_and_is_audited(client, movies_only, light_calls):
+    for media_type in ("movie", "track"):
+        body = payload("media.play", uuid="uuid-living")
+        body["Metadata"]["type"] = media_type
+        assert post(client, body).status_code == 200
+        drain()
+    assert light_calls == RESTORED
+    queued = [r for r in rows(client) if r["action"] == "light.action_queued"]
+    assert [(r["target_id"], r["detail"]["request"]) for r in queued] == [
+        ("living_room", "dim"), ("bedroom", "dim"), ("living_room", "restore"), ("bedroom", "restore")]
 
 
 def test_option_is_per_room(movies_only, light_calls):
