@@ -267,9 +267,11 @@ accepted). A `media.play`/`media.resume` of another type, or with no
 `Metadata.type`, is ignored for dispatch: it does not mark the player active, set
 an expiry or trigger automations, though it is still stored, counted in
 `plex_webhook_events_total` and audited as `webhook.receipt` `received/accepted`.
-`media.pause` and `media.stop` are never filtered, so switching from a film to
-music on the same player restores the room and leaves it restored. An empty list
-is rejected on validate/reload.
+`media.pause` and `media.stop` are never filtered, and a filtered play or resume
+from the player that dimmed the room ends its playback just as a stop would, so
+switching from a film to music on the same player restores the room and leaves it
+restored, whether or not Plex sends a stop between the two. An empty list is
+rejected on validate/reload.
 
 **One room per Plex player, and lights are not shared.** A room's `plex_clients`
 must hold exactly one entry, and a light `id` may appear in only one room. Several
