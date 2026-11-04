@@ -5,8 +5,8 @@ repository is **public**. Read `README.md` first; the rules below come from it.
 
 ## Run the tests
 
-Use Python 3.12, as CI and the container do. From the repo root, in a virtual
-environment:
+Use Python 3.12, as CI does. (The container image is on Python 3.14; see the
+`FROM` line in the `Dockerfile`.) From the repo root, in a virtual environment:
 
 ```sh
 pip install --require-hashes --only-binary :all: -r requirements-dev.lock
