@@ -315,10 +315,6 @@ class RoomRegistry:
         self.load_outcome, self.load_reason = "activated", "loaded"
         logger.info("loaded %d room(s)", len(self.rooms))
 
-    def resolve_room(self, payload: dict) -> str | None:
-        player = (payload or {}).get("Player") or {}
-        return _resolve(self._state, player.get("uuid"), player.get("title"))
-
     def player_label(self, title, uuid=None) -> str | None:
         """The room this player resolves to the way dispatch resolves it (uuid first, then title, case-insensitive).
 
