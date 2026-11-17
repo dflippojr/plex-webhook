@@ -106,7 +106,7 @@ def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry,
         assert client.post("/webhook", data=request).status_code == 200
     drain()
     drain()
-    for directory in (tmp_path, Path(os.environ["DATA_DIR"])):
+    for directory in (tmp_path, Path(os.environ["DB_PATH"]).parent):
         assert not (directory / "events.jsonl").exists()
     receipts = [r for r in rows(client) if r["action"] == "webhook.receipt"]
     assert [r["reason_code"] for r in receipts] == ["accepted", "invalid_json", "missing_payload", "server_not_allowed"]

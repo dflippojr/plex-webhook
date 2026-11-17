@@ -11,7 +11,6 @@ import pytest
 # The app reads these paths at import time, so point them at a scratch
 # directory before anything imports `app`.
 _SCRATCH = Path(tempfile.mkdtemp(prefix="plex-webhook-tests-"))
-os.environ["DATA_DIR"] = str(_SCRATCH / "data")
 os.environ["DB_PATH"] = str(_SCRATCH / "data" / "plex_events.db")
 os.environ["ROOMS_CONFIG_PATH"] = str(_SCRATCH / "rooms.yaml")
 os.environ["DEVICES_SECRETS_PATH"] = str(_SCRATCH / "devices.secrets.yaml")
