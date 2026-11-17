@@ -74,14 +74,11 @@ class PlaybackJourney:
 
     def assert_capture(self):
         stored = self.client.conn.execute(
-            "SELECT id, received_at, event, raw_payload FROM events ORDER BY id"
+            "SELECT id, received_at, event, raw_payload, raw_truncated, attachments FROM events ORDER BY id"
         ).fetchall()
-        captured = [json.loads(line) for line in self.client.log.read_text(encoding="utf-8").splitlines()]
         assert [json.loads(row[3]) for row in stored] == self.payloads
-        assert captured == [
-            {"received_at": row[1], "event": body["event"], "payload": body, "attachments": []}
-            for row, body in zip(stored, self.payloads)
-        ]
+        assert [(row[4], row[5]) for row in stored] == [(0, "[]")] * len(self.payloads)
+        assert not self.client.log.exists()
         assert [row[2] for row in stored] == [body["event"] for body in self.payloads]
 
         log = rows(self.client)

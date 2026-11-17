@@ -1,8 +1,10 @@
 import asyncio
 import importlib
 import json
+import os
 import sqlite3
 import types
+from pathlib import Path
 
 import pytest
 from prometheus_client import REGISTRY
@@ -22,7 +24,7 @@ def test_webhook_valid_payload_records_and_dispatches(client, light_calls):
     assert client.conn.execute("SELECT event, player_title, title FROM events").fetchall() == [
         ("media.play", "Living Room TV", "A Film")
     ]
-    assert json.loads(client.log.read_text().splitlines()[0])["event"] == "media.play"
+    assert json.loads(client.conn.execute("SELECT raw_payload FROM events").fetchone()[0]) == payload("media.play")
     drain()
     drain()
     assert light_calls == [("dim", ["AA:BB"])]
@@ -39,7 +41,7 @@ def test_webhook_received_at_always_has_microseconds(client, monkeypatch):
     monkeypatch.setattr(main, "datetime", WholeSecond)
     assert post(client, payload("media.play")).status_code == 200
     expected = "2026-07-18T12:00:00.000000+00:00"
-    assert json.loads(client.log.read_text().splitlines()[0])["received_at"] == expected
+    assert not client.log.exists()
     assert client.conn.execute("SELECT received_at FROM events").fetchall() == [(expected,)]
     drain()
     drain()
@@ -61,15 +63,55 @@ def test_webhook_without_payload_field(client):
     assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
 
-def test_webhook_with_attachment_is_logged(client):
+def test_webhook_with_two_attachments_stores_both_in_order(client):
+    resp = client.post(
+        "/webhook",
+        data={"payload": json.dumps(payload("media.stop"))},
+        files=[("thumb", ("t.jpg", b"jpgbytes", "image/jpeg")), ("art", ("a.png", b"pngbytes", "image/png"))],
+    )
+    assert resp.status_code == 200
+    (stored,) = client.conn.execute("SELECT attachments FROM events").fetchone()
+    assert json.loads(stored) == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"},
+                                  {"field": "art", "filename": "a.png", "content_type": "image/png"}]
+
+
+def test_attachment_metadata_is_stored_in_sqlite(client):
     resp = client.post(
         "/webhook",
         data={"payload": json.dumps(payload("media.stop"))},
         files={"thumb": ("t.jpg", b"jpgbytes", "image/jpeg")},
     )
     assert resp.status_code == 200
-    record = json.loads(client.log.read_text().splitlines()[0])
-    assert record["attachments"] == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
+    (stored,) = client.conn.execute("SELECT attachments FROM events").fetchone()
+    assert json.loads(stored) == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
+
+
+def test_unpaired_surrogate_in_attachment_filename_is_stored(memory_db):
+    from app.db import insert_event
+
+    insert_event(memory_db, "t", None, None, "null",
+                 attachments=[{"field": "thumb", "filename": "a\ud800.jpg", "content_type": "image/jpeg"}])
+    (stored,) = memory_db.execute("SELECT attachments FROM events").fetchone()
+    assert json.loads(stored)[0]["filename"] == "a\ud800.jpg"
+
+
+def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry, rooms_file, tmp_path):
+    rooms_file.write_text(ROOMS_YAML + "allowed_server_uuids: [server-ours]\n", encoding="utf-8")
+    registry.reload()
+    listed, unlisted = payload("media.play"), payload("media.play")
+    listed["Server"], unlisted["Server"] = {"uuid": "server-ours"}, {"uuid": "server-other"}
+    for request in ({"payload": json.dumps(listed)}, {"payload": "{not json"},
+                    {"other": "x"}, {"payload": json.dumps(unlisted)}):
+        assert client.post("/webhook", data=request).status_code == 200
+    drain()
+    drain()
+    for directory in (tmp_path, Path(os.environ["DB_PATH"]).parent):
+        assert not (directory / "events.jsonl").exists()
+    receipts = [r for r in rows(client) if r["action"] == "webhook.receipt"]
+    assert [r["reason_code"] for r in receipts] == ["accepted", "invalid_json", "missing_payload", "server_not_allowed"]
+    stored = [row[0] for row in client.conn.execute("SELECT id FROM events ORDER BY id")]
+    assert [(r["target_kind"], r["target_id"]) for r in receipts] == [("event", str(i)) for i in stored]
+    assert len(stored) == 4
 
 
 def _event_series():
@@ -267,8 +309,7 @@ def test_invalid_startup_still_captures_webhook(client, rooms_file, monkeypatch,
     monkeypatch.setattr(main, "registry", startup)
     monkeypatch.setattr(dispatcher, "registry", startup)
     assert post(client, payload("media.play")).status_code == 200
-    assert json.loads(client.log.read_text().splitlines()[0])["event"] == "media.play"
-    assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    assert client.conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
     drain()
     assert light_calls == []
 
@@ -319,7 +360,7 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
 
 def _stored(client):
     return (client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
-            client.log.exists() and client.log.read_text() != "")
+            client.log.exists())
 
 
 def _rejected(reason):
@@ -418,8 +459,7 @@ def test_large_stored_payload_is_truncated_but_still_dispatched(client, light_ca
     assert post(client, body).status_code == 200
     raw, truncated, title = client.conn.execute("SELECT raw_payload, raw_truncated, title FROM events").fetchone()
     assert truncated == 1 and len(raw.encode("utf-8")) <= 300 and title == "A Film"
-    line = json.loads(client.log.read_text().splitlines()[0])
-    assert line["payload_truncated"] is True and len(line["payload"].encode("utf-8")) <= 300
+    assert json.dumps(body).startswith(raw)
     drain()
     drain()
     assert light_calls == [("dim", ["AA:BB"])]
@@ -428,7 +468,7 @@ def test_large_stored_payload_is_truncated_but_still_dispatched(client, light_ca
 def test_normal_payload_is_not_marked_truncated(client):
     post(client, payload("media.play"))
     assert client.conn.execute("SELECT raw_truncated FROM events").fetchone() == (0,)
-    assert "payload_truncated" not in json.loads(client.log.read_text().splitlines()[0])
+    assert json.loads(client.conn.execute("SELECT raw_payload FROM events").fetchone()[0]) == payload("media.play")
 
 
 def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
@@ -446,6 +486,27 @@ def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_existing_database_gains_attachments_column(tmp_path, monkeypatch):
+    import app.db as appdb
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, event TEXT, "
+                     "account_title TEXT, player_title TEXT, player_uuid TEXT, media_type TEXT, title TEXT, "
+                     "grandparent_title TEXT, rating_key TEXT, raw_payload TEXT NOT NULL, "
+                     "raw_truncated INTEGER NOT NULL DEFAULT 0)")
+        conn.execute("INSERT INTO events (received_at, raw_payload) VALUES ('t', '{}')")
+    monkeypatch.setattr(appdb, "DB_PATH", path)
+    conn = appdb.get_connection()
+    try:
+        # A row stored before the column existed has unknown attachments, not "none".
+        assert conn.execute("SELECT attachments FROM events").fetchall() == [(None,)]
+        appdb.insert_event(conn, "t2", "media.play", None, "{}", attachments=[])
+        assert conn.execute("SELECT attachments FROM events ORDER BY id").fetchall() == [(None,), ("[]",)]
+    finally:
+        conn.close()
+
+
 def test_urlencoded_oversized_field_is_413_and_stores_nothing(client):
     before = _rejected("field_too_large")
     resp = client.post("/webhook", data={"payload": "x" * (600 * 1024)})
@@ -458,7 +519,7 @@ def _hostile_post(client, raw):
     resp = client.post("/webhook", files={"payload": (None, raw)})
     assert resp.status_code == 200
     assert client.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
-    assert len(client.log.read_text().splitlines()) == 1
+    assert not client.log.exists()
     return rows(client)[0]
 
 
@@ -560,8 +621,7 @@ def test_unstorable_value_in_each_stored_field_is_invalid_payload(client, light_
         "raw_payload, raw_truncated FROM events").fetchall() == [
         (None, None, None, None, None, None, None, None, json.dumps(body), 0)
     ]
-    line = json.loads(client.log.read_text(encoding="utf-8"))
-    assert (line["event"], line["payload"]) == (None, json.loads(json.dumps(body)))
+    assert client.conn.execute("SELECT attachments FROM events").fetchall() == [("[]",)]
     after = _webhook_metrics()
     events = ("plex_webhook_events_total", (("account", "other"), ("event", "unknown"), ("player", "unknown")))
     assert after.pop(events) == before.pop(events, 0) + 1
@@ -646,9 +706,6 @@ def test_nan_and_infinity_tokens_are_invalid_json(client, light_calls, token):
            '"Metadata":{"type":"movie","duration":%s,"ratingKey":"42"}}' % token)
     receipt = _hostile_post(client, raw)
     assert (receipt["action"], receipt["outcome"], receipt["reason_code"]) == ("webhook.receipt", "rejected", "invalid_json")
-    line = client.log.read_text(encoding="utf-8").splitlines()[-1]
-    assert token not in line
-    assert json.loads(line)["payload"] is None
     assert client.conn.execute("SELECT raw_payload FROM events").fetchone()[0] == "null"
     drain()
     drain()

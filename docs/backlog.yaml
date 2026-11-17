@@ -112,3 +112,35 @@ items:
       section.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: retire-events-jsonl
+    kind: deferred
+    status: done
+    issue: 183
+    title: "Retire the duplicate events.jsonl raw capture now that SQLite stores every event"
+    body: |
+      Every accepted webhook was stored twice: a line in `events.jsonl` and an `events`
+      row in SQLite. Owner decision (option (a)): stop writing the log and keep the
+      attachment metadata in a new nullable `events.attachments` column.
+
+      Built in #183 (stages 1 and 2): the column is written with every row and no
+      `events.jsonl` is created. `audit_cli prune` still trims an existing log; removing
+      that code is `remove-events-jsonl-prune`.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: remove-events-jsonl-prune
+    kind: deferred
+    title: "Remove the events.jsonl pruning code one release after the log stopped being written"
+    body: |
+      #183 stopped writing `events.jsonl`; `audit_cli prune` still trims a log left by an
+      earlier release so its old lines age out. One release later, remove
+      `prune_event_log`, the `--events-log` option, the `event_log_eligible` and
+      `event_log_removed` output fields and their tests, and update `docs/audit.md`
+      "Retention maintenance" and the README Phase 1 section.
+
+      Deleting the log-pruning tests needs the owner's `gate-change-approved` label. Removing
+      covered code can lower the coverage percentage, so check the total against
+      `fail_under` in `.coveragerc` first.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.

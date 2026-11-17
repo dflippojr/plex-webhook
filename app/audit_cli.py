@@ -91,7 +91,10 @@ def _log_received_before(line, cutoff):
 
 
 def prune_event_log(path, cutoff, *, apply=False):
-    """Count, and with apply remove, events.jsonl lines older than the cutoff; returns (eligible, kept)."""
+    """Count, and with apply remove, legacy events.jsonl lines older than the cutoff; returns (eligible, kept).
+
+    The service stopped writing events.jsonl (#183); this trims a file an earlier release left behind.
+    """
     path = Path(path)
     if not path.is_file():
         return 0, 0
@@ -122,7 +125,7 @@ def prune_event_log(path, cutoff, *, apply=False):
 def prune(conn, *, apply=False, now=None, events_log=None):
     """Sole supported deletion path: explicit offline owner-run 90-day retention.
 
-    Covers audit rows, legacy `events` rows and, when given, events.jsonl.
+    Covers audit rows, `events` rows and, when given, a legacy events.jsonl.
     """
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=90)).isoformat(timespec="microseconds")
     # Legacy whole-second received_at ("...:00+00:00") sorts before the cutoff's ".000000" twin.
@@ -161,8 +164,8 @@ def parser():
         command.add_argument("--until", type=utc_argument)
     command = commands.add_parser("prune", help="Offline 90-day retention, dry-run by default")
     command.add_argument("--apply", action="store_true",
-                         help="Delete eligible audit and event rows and trim events.jsonl; service must be stopped")
-    command.add_argument("--events-log", help="events.jsonl to trim (default: beside the database, if present)")
+                         help="Delete eligible audit and event rows and trim a legacy events.jsonl; service must be stopped")
+    command.add_argument("--events-log", help="Legacy events.jsonl to trim (default: beside the database, if present)")
     return result
 
 

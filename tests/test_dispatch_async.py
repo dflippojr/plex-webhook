@@ -31,8 +31,6 @@ rooms:
         conn.executescript(db.SCHEMA)
         monkeypatch.setattr(db, "DB_PATH", path)
         monkeypatch.setattr(main, "db_conn", conn)
-        monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(main, "EVENT_LOG", tmp_path / "events.jsonl")
         yield
     finally:
         try:

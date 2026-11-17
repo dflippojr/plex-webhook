@@ -9,6 +9,7 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#2](https://github.com/dflippojr/plex-webhook/issues/2) wire live `rooms.yaml` and device credentials, then dim on real playback
 - [#3](https://github.com/dflippojr/plex-webhook/issues/3) verify Govee LAN control against a real bulb (blocked on #2)
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
+- remove the legacy `events.jsonl` pruning code one release after #183 stopped writing the log (backlog `remove-events-jsonl-prune`, not filed yet)
 
 The next planned steps are those three hardware checks; they need the owner's devices
 and accounts.
@@ -149,17 +150,23 @@ capture available; a missing startup file also leaves dispatch disabled.
 
 ## Phase 1 — raw event capture
 
-Each accepted delivery is appended as a JSON line to `./data/events.jsonl`:
-`received_at`, `event` type, full decoded `payload`, and any attachment
-metadata (e.g. thumbnail). This includes deliveries whose payload is missing or
-not valid JSON, including JSON nested too deeply to parse and the non-standard
+Each accepted delivery is stored as one row of the `events` table in
+`./data/plex_events.db` (SQLite): `received_at`, `event` type, the decoded
+payload as JSON text in `raw_payload`, and the metadata of any file part (e.g. a
+thumbnail) in `attachments`, a JSON list of `field`, `filename` and
+`content_type` (`[]` when there is none; the file bytes are not kept). Rows
+stored before the column existed have `attachments` NULL. This includes
+deliveries whose payload is missing or not valid JSON, including JSON nested too deeply to parse and the non-standard
 `NaN`, `Infinity` and `-Infinity` tokens (`invalid_json`), and a
 payload SQLite cannot store, such as a lone UTF-16 surrogate or an integer beyond
 64 bits in a stored field (`invalid_payload`); both return 200 and are not dispatched.
 It does **not** include requests rejected before storage:
 `invalid_form` (400), oversized requests (413) and handler crashes leave no
-`events.jsonl` line or `events` row (the audit trail and metrics still note
-them where applicable).
+`events` row (the audit trail and metrics still note them where applicable).
+
+Earlier releases also appended each delivery to `./data/events.jsonl`. That file
+is no longer written; an existing one is left in place and is still trimmed by the
+retention command below, so its old lines age out.
 
 ### Request and storage bounds
 
@@ -174,21 +181,20 @@ parsed or stored. Over-limit requests get **413**, are counted in
 | Files (thumbnail) | 2 | `too_many_files` |
 | Size of one non-file field | 512 KiB | `field_too_large` |
 
-A malformed `Content-Length` gets 400. The stored `raw_payload` (SQLite) and the
-`payload` in `events.jsonl` are each capped at `RAW_PAYLOAD_MAX_BYTES` (default
-64 KiB of UTF-8). A longer payload is cut at the cap; the parsed columns and the
-dispatched event are unaffected. Truncated SQLite rows have `raw_truncated = 1`;
-truncated JSONL lines have `"payload_truncated": true` and `payload` is the
-truncated JSON text rather than an object. Existing databases gain the
-`raw_truncated` column (default 0) on the next service start.
+A malformed `Content-Length` gets 400. The stored `raw_payload` is capped at
+`RAW_PAYLOAD_MAX_BYTES` (default 64 KiB of UTF-8). A longer payload is cut at the
+cap; the parsed columns and the dispatched event are unaffected. Truncated rows
+have `raw_truncated = 1`, and their `raw_payload` is the cut JSON text, which no
+longer parses. Existing databases gain the `raw_truncated` column (default 0) and
+the `attachments` column (NULL) on the next service start.
 
 Stored events are pruned with the owner-run offline retention command in
 [`docs/audit.md`](docs/audit.md#retention-maintenance-owner-only).
 
 ## Phase 2 — structured storage + metrics
 
-Events are also parsed into `./data/plex_events.db` (SQLite, `events`
-table) and exposed as Prometheus metrics (`plex_webhook_events_total`,
+Each `events` row also holds parsed columns (player, account, media type,
+title and rating key) and the events are exposed as Prometheus metrics (`plex_webhook_events_total`,
 `plex_webhook_last_event_timestamp_seconds`), scraped by the existing
 `observability-stack` Prometheus and shown on the "Plex Webhook" Grafana
 dashboard in the "Basement PC" folder.
@@ -359,13 +365,13 @@ allowed_server_uuids:        # optional top-level; omit (or null) to accept ever
 ```
 
 When set, only events whose `Server.uuid` is on the list are dispatched. Events
-from any other server, or with no `Server.uuid`, are still stored (SQLite and
-`events.jsonl`), counted in `plex_webhook_events_total` and
+from any other server, or with no `Server.uuid`, are still stored (an `events`
+row), counted in `plex_webhook_events_total` and
 `plex_webhook_unlisted_server_events_total`, and audited as
 `webhook.receipt` `received/server_not_allowed`, but never change any light. An
 empty list is rejected on validate/reload so a typo cannot silently ignore every
 event. Find your server's UUID in any captured event (`Server.uuid` in
-`events.jsonl`), or as `machineIdentifier` at `http://<plex>:32400/identity`.
+an `events` row's `raw_payload`), or as `machineIdentifier` at `http://<plex>:32400/identity`.
 
 ### Optional cross-room automations
 
@@ -541,9 +547,9 @@ An offline pytest suite covers the webhook receiver, the room dispatcher, the
 SQLite event store and the Govee and Tuya controllers. Devices, `requests` and
 `tinytuya` are replaced by fakes, and any non-loopback network access fails
 the test. No `/data`, `/config` or `.env` is needed: the suite points the
-paths at a temporary directory through the `DATA_DIR`, `DB_PATH` and
-`ROOMS_CONFIG_PATH` environment variables (unset, they default to `/data`,
-`/data/plex_events.db` and `/config/rooms.yaml`, as in the container).
+paths at a temporary directory through the `DB_PATH` and `ROOMS_CONFIG_PATH`
+environment variables (unset, they default to `/data/plex_events.db` and
+`/config/rooms.yaml`, as in the container).
 
 ```bash
 pip install --require-hashes --only-binary :all: -r requirements-dev.lock   # Python 3.12
