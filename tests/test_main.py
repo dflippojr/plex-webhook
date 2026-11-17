@@ -1,8 +1,10 @@
 import asyncio
 import importlib
 import json
+import os
 import sqlite3
 import types
+from pathlib import Path
 
 import pytest
 from prometheus_client import REGISTRY
@@ -94,9 +96,6 @@ def test_unpaired_surrogate_in_attachment_filename_is_stored(memory_db):
 
 
 def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry, rooms_file, tmp_path):
-    import os
-    from pathlib import Path
-
     rooms_file.write_text(ROOMS_YAML + "allowed_server_uuids: [server-ours]\n", encoding="utf-8")
     registry.reload()
     listed, unlisted = payload("media.play"), payload("media.play")
