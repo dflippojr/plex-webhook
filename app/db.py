@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from contextlib import closing
@@ -20,7 +21,8 @@ CREATE TABLE IF NOT EXISTS events (
     grandparent_title TEXT,
     rating_key TEXT,
     raw_payload TEXT NOT NULL,
-    raw_truncated INTEGER NOT NULL DEFAULT 0
+    raw_truncated INTEGER NOT NULL DEFAULT 0,
+    attachments TEXT
 );
 CREATE TABLE IF NOT EXISTS light_restore_records (
     room TEXT NOT NULL,
@@ -50,15 +52,26 @@ CREATE INDEX IF NOT EXISTS idx_events_clients_cover
 """
 
 
+# Columns added to events after its first release, as (name, statement that adds it).
+LATER_COLUMNS = (
+    ("raw_truncated", "ALTER TABLE events ADD COLUMN raw_truncated INTEGER NOT NULL DEFAULT 0"),
+    ("attachments", "ALTER TABLE events ADD COLUMN attachments TEXT"),
+)
+
+
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
-    # Databases created before the stored-size cap lack the marker column.
-    if "raw_truncated" not in {row[1] for row in conn.execute("PRAGMA table_info(events)")}:
-        conn.execute("ALTER TABLE events ADD COLUMN raw_truncated INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
+    # Databases created before the stored-size cap or before attachments moved out of
+    # events.jsonl lack these columns. Existing rows keep NULL attachments: unknown.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    for name, statement in LATER_COLUMNS:
+        if name not in columns:
+            conn.execute(statement)
+            conn.commit()
     return conn
+
 
 
 # Payload values insert_event stores, as (group, field names), in the order of their
@@ -78,16 +91,20 @@ def stored_values(payload):
             yield fields.get(name)
 
 
-def insert_event(conn, received_at, event, payload, raw_payload_json, raw_truncated=False):
+def insert_event(conn, received_at, event, payload, raw_payload_json, raw_truncated=False, attachments=None):
+    """Store one event. attachments is the list of file-part metadata, saved as JSON text ("[]" for none)."""
+    # ASCII-escaped JSON, so an unpaired surrogate in an unauthenticated filename cannot fail the insert.
+    attachments_json = None if attachments is None else json.dumps(attachments)
     with WRITE_LOCK:
         cursor = conn.execute(
             """
             INSERT INTO events (
                 received_at, event, account_title, player_title, player_uuid,
-                media_type, title, grandparent_title, rating_key, raw_payload, raw_truncated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                media_type, title, grandparent_title, rating_key, raw_payload, raw_truncated, attachments
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (received_at, event, *stored_values(payload), raw_payload_json, 1 if raw_truncated else 0),
+            (received_at, event, *stored_values(payload), raw_payload_json, 1 if raw_truncated else 0,
+             attachments_json),
         )
         conn.commit()
         return cursor.lastrowid

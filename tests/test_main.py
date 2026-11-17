@@ -83,6 +83,15 @@ def test_attachment_metadata_is_stored_in_sqlite(client):
     assert json.loads(stored) == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
 
 
+def test_unpaired_surrogate_in_attachment_filename_is_stored(memory_db):
+    from app.db import insert_event
+
+    insert_event(memory_db, "t", None, None, "null",
+                 attachments=[{"field": "thumb", "filename": "a\ud800.jpg", "content_type": "image/jpeg"}])
+    (stored,) = memory_db.execute("SELECT attachments FROM events").fetchone()
+    assert json.loads(stored)[0]["filename"] == "a\ud800.jpg"
+
+
 def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry, rooms_file, tmp_path):
     import os
     from pathlib import Path
@@ -477,6 +486,27 @@ def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
     conn = appdb.get_connection()
     assert conn.execute("SELECT raw_truncated FROM events").fetchall() == [(0,)]
     conn.close()
+
+
+def test_existing_database_gains_attachments_column(tmp_path, monkeypatch):
+    import app.db as appdb
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, event TEXT, "
+                     "account_title TEXT, player_title TEXT, player_uuid TEXT, media_type TEXT, title TEXT, "
+                     "grandparent_title TEXT, rating_key TEXT, raw_payload TEXT NOT NULL, "
+                     "raw_truncated INTEGER NOT NULL DEFAULT 0)")
+        conn.execute("INSERT INTO events (received_at, raw_payload) VALUES ('t', '{}')")
+    monkeypatch.setattr(appdb, "DB_PATH", path)
+    conn = appdb.get_connection()
+    try:
+        # A row stored before the column existed has unknown attachments, not "none".
+        assert conn.execute("SELECT attachments FROM events").fetchall() == [(None,)]
+        appdb.insert_event(conn, "t2", "media.play", None, "{}", attachments=[])
+        assert conn.execute("SELECT attachments FROM events ORDER BY id").fetchall() == [(None,), ("[]",)]
+    finally:
+        conn.close()
 
 
 def test_urlencoded_oversized_field_is_413_and_stores_nothing(client):

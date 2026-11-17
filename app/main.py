@@ -361,7 +361,7 @@ async def plex_webhook(request: Request):
     with EVENT_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
-    event_id = insert_event(db_conn, received_at, event_type, payload, raw_json, truncated)
+    event_id = insert_event(db_conn, received_at, event_type, payload, raw_json, truncated, attachments)
     _record_audit(action="webhook.receipt",
                   outcome="received" if reason in ("accepted", "server_not_allowed") else "rejected",
                   reason_code=reason, correlation=correlation, event_id=event_id)
