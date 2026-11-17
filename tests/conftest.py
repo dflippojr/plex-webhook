@@ -153,18 +153,22 @@ def client(tmp_path, monkeypatch, registry, light_calls):
     monkeypatch.setitem(main._denial_window, "start", 0.0)
     monkeypatch.setitem(main._denial_window, "count", 0)
     monkeypatch.setattr(main, "db_conn", conn)
-    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(main, "EVENT_LOG", tmp_path / "events.jsonl")
     with TestClient(main.app) as c:
         c.admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
         c.headers.update(c.admin)  # webhook posts ignore it; admin routes need it
         c.conn, c.log = conn, tmp_path / "events.jsonl"
         yield c
-    conn.close()
-    # Every events.jsonl line must be standard JSON (no NaN/Infinity tokens).
-    if c.log.exists():
-        for line in c.log.read_text(encoding="utf-8").splitlines():
-            json.loads(line, parse_constant=_reject_constant)
+    try:
+        # The retired events.jsonl is never written again (#183).
+        assert not c.log.exists()
+        # Every stored copy must be standard JSON (no NaN/Infinity tokens); a truncated payload is cut text.
+        for raw, truncated, attachments in conn.execute("SELECT raw_payload, raw_truncated, attachments FROM events"):
+            if not truncated:
+                json.loads(raw, parse_constant=_reject_constant)
+            if attachments is not None:
+                json.loads(attachments, parse_constant=_reject_constant)
+    finally:
+        conn.close()
 
 
 def _reject_constant(constant):

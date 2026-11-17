@@ -1,4 +1,6 @@
 """Stale-play expiry and the optional Plex server allow-list, with a fake clock and recorded light actions."""
+import json
+
 import pytest
 from prometheus_client import REGISTRY
 
@@ -268,7 +270,8 @@ def test_event_from_unlisted_server_is_recorded_but_not_dispatched(client, allow
     assert dispatcher._active_clients == {}
     assert unlisted_count() == before + 1
     assert client.conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
-    assert "media.play" in client.log.read_text(encoding="utf-8")
+    raw = client.conn.execute("SELECT raw_payload FROM events").fetchone()[0]
+    assert json.loads(raw) == from_server("media.play", server_uuid)
     receipt = [r for r in rows(client) if r["action"] == "webhook.receipt"][-1]
     assert (receipt["outcome"], receipt["reason_code"]) == ("received", "server_not_allowed")
 

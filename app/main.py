@@ -1,11 +1,9 @@
 import asyncio
 import json
-import os
 import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 
 import threading
 
@@ -35,16 +33,12 @@ async def lifespan(_app):
 
 app = FastAPI(title="plex-webhook", lifespan=lifespan)
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-EVENT_LOG = DATA_DIR / "events.jsonl"
-
-
 # Request bounds for the unauthenticated webhook, sized for a Plex delivery:
 # one JSON `payload` field plus an optional thumbnail.
 MAX_BODY_BYTES = _env_int("WEBHOOK_MAX_BODY_BYTES", 2 * 1024 * 1024)
 MAX_FORM_FILES, MAX_FORM_FIELDS = 2, 10
 MAX_FIELD_BYTES = 512 * 1024
-# Stored copies of the raw payload (SQLite and events.jsonl) are truncated here.
+# The stored raw payload (events.raw_payload) is truncated here.
 RAW_PAYLOAD_MAX_BYTES = _env_int("RAW_PAYLOAD_MAX_BYTES", 64 * 1024)
 
 
@@ -345,22 +339,7 @@ async def plex_webhook(request: Request):
     event_type = payload.get("event") if payload else None
     received_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
-    record = {
-        "received_at": received_at,
-        "event": event_type,
-        "payload": decoded_payload,
-        "attachments": attachments,
-    }
-
     raw_json, truncated = _bounded_raw(json.dumps(decoded_payload))
-    if truncated:
-        record["payload"] = raw_json
-        record["payload_truncated"] = True
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with EVENT_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-
     event_id = insert_event(db_conn, received_at, event_type, payload, raw_json, truncated, attachments)
     _record_audit(action="webhook.receipt",
                   outcome="received" if reason in ("accepted", "server_not_allowed") else "rejected",
