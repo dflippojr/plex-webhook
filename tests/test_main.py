@@ -72,6 +72,39 @@ def test_webhook_with_attachment_is_logged(client):
     assert record["attachments"] == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
 
 
+def test_attachment_metadata_is_stored_in_sqlite(client):
+    resp = client.post(
+        "/webhook",
+        data={"payload": json.dumps(payload("media.stop"))},
+        files={"thumb": ("t.jpg", b"jpgbytes", "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    (stored,) = client.conn.execute("SELECT attachments FROM events").fetchone()
+    assert json.loads(stored) == [{"field": "thumb", "filename": "t.jpg", "content_type": "image/jpeg"}]
+
+
+def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry, rooms_file, tmp_path):
+    import os
+    from pathlib import Path
+
+    rooms_file.write_text(ROOMS_YAML + "allowed_server_uuids: [server-ours]\n", encoding="utf-8")
+    registry.reload()
+    unlisted = payload("media.play")
+    unlisted["Server"] = {"uuid": "server-other"}
+    for request in ({"payload": json.dumps(payload("media.play"))}, {"payload": "{not json"},
+                    {"other": "x"}, {"payload": json.dumps(unlisted)}):
+        assert client.post("/webhook", data=request).status_code == 200
+    drain()
+    drain()
+    for directory in (tmp_path, Path(os.environ["DATA_DIR"])):
+        assert not (directory / "events.jsonl").exists()
+    receipts = [r for r in rows(client) if r["action"] == "webhook.receipt"]
+    assert [r["reason_code"] for r in receipts] == ["accepted", "invalid_json", "missing_payload", "server_not_allowed"]
+    stored = [row[0] for row in client.conn.execute("SELECT id FROM events ORDER BY id")]
+    assert [(r["target_kind"], r["target_id"]) for r in receipts] == [("event", str(i)) for i in stored]
+    assert len(stored) == 4
+
+
 def _event_series():
     return {tuple(sample.labels[name] for name in ("event", "player", "account"))
             for metric in REGISTRY.collect() if metric.name == "plex_webhook_events"
