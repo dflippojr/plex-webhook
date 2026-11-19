@@ -321,6 +321,64 @@ def test_startup_keeps_working_when_the_file_cannot_switch_to_wal(tmp_path, monk
         conn.close()
 
 
+def _hold_read_lock(path):
+    reader = sqlite3.connect(path)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM events").fetchone()  # a rollback-mode reader, like an open CLI
+    return reader
+
+
+def test_first_upgrade_starts_on_the_existing_schema_while_a_reader_holds_the_file(tmp_path, monkeypatch, caplog):
+    from app import storage
+
+    path = tmp_path / "legacy.db"
+    _legacy_database(path, MASTER_SCHEMA)  # version 0, rollback journal: the first start after #180
+    with sqlite3.connect(path) as conn:
+        before = _snapshot(conn)
+    conn.close()
+    monkeypatch.setattr(storage, "BUSY_TIMEOUT_S", 0.05)
+    reader = _hold_read_lock(path)
+    try:
+        conn = storage.open_database(path)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+            assert conn.execute("PRAGMA user_version").fetchone() == (0,)
+            assert _snapshot(conn) == before
+            assert "reason=wal_unavailable" in caplog.text
+            assert "reason=migration_deferred version=0" in caplog.text
+        finally:
+            conn.close()
+    finally:
+        reader.close()
+    caplog.clear()
+    conn = storage.open_database(path)  # the next start, with the reader gone, finishes the upgrade
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS),)
+        assert _snapshot(conn) == before
+        assert "migration_deferred" not in caplog.text
+    finally:
+        conn.close()
+
+
+def test_first_upgrade_that_must_add_a_column_fails_while_a_reader_holds_the_file(tmp_path, monkeypatch):
+    from app import storage
+
+    path = tmp_path / "old.db"
+    _legacy_database(path, OLD_SCHEMA)  # missing columns master added at start, which needs the write lock
+    monkeypatch.setattr(storage, "BUSY_TIMEOUT_S", 0.05)
+    reader = _hold_read_lock(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            storage.open_database(path).close()
+    finally:
+        reader.close()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (0,)
+        assert "raw_truncated" not in _columns(conn, "events")
+    conn.close()
+
+
 def test_a_failing_migration_step_leaves_the_file_at_the_previous_version(tmp_path, monkeypatch):
     from app import storage
 
