@@ -27,8 +27,22 @@ sudo chown -R 10001 data
 docker compose up -d --build
 ```
 
-Binds to `127.0.0.1:9800` only (loopback) since Plex Media Server runs on
-the same host — no need to expose this beyond localhost.
+#### Who can reach the service
+
+The compose file publishes the service port on the host's loopback only
+(`127.0.0.1:9800`), for Plex Media Server on the same host. That mapping is not
+the only way in. Inside the container the service listens on all interfaces
+(port 8000), and the container also joins the external Docker network named in
+`docker-compose.yml`, which the monitoring stack uses to scrape `/metrics`.
+So these callers can reach every route (`/webhook`, `/metrics`, `/health` and the
+admin routes):
+
+- any process on the host, through the loopback mapping;
+- any container attached to that shared Docker network, directly on port 8000.
+
+Nothing else on the LAN can reach it unless you change the port mapping. The
+admin routes always need `ADMIN_API_TOKEN`. The webhook needs a secret only when
+`WEBHOOK_TOKEN` is set, so set it (see [Webhook token](#webhook-token)).
 
 Dependencies install from `requirements.lock`, which locks every
 transitive package with hashes. After editing the direct pins in
@@ -52,17 +66,22 @@ the light's `model` are configured.
 
 ## Configure in Plex
 
-Plex web UI → Settings → Account → Webhooks → Add Webhook:
+Plex web UI → Settings → Account → Webhooks → Add Webhook. With `WEBHOOK_TOKEN`
+set (recommended; see [Webhook token](#webhook-token)), put the token at the end
+of the path:
 
 ```
-http://127.0.0.1:9800/webhook
+http://127.0.0.1:9800/webhook/<WEBHOOK_TOKEN>
 ```
+
+Without a token the URL is `http://127.0.0.1:9800/webhook`.
 
 (Requires Plex Pass, confirmed active on this account.)
 
 ## Endpoints
 
-- `POST /webhook` — Plex webhook target (unauthenticated; see Route permissions).
+- `POST /webhook/{token}` — Plex webhook target when `WEBHOOK_TOKEN` is set (see Webhook token).
+- `POST /webhook` — Plex webhook target when `WEBHOOK_TOKEN` is unset (unauthenticated; see Route permissions).
 - `GET /health` — liveness check (public).
 - `GET /metrics` — Prometheus metrics (public, for monitoring).
 - `GET /clients` (admin token) — every distinct Plex client (`title` + `uuid`) seen in
@@ -81,7 +100,8 @@ http://127.0.0.1:9800/webhook
 | Route | Access | Audit actor |
 | --- | --- | --- |
 | `GET /health`, `GET /metrics` | public | none |
-| `POST /webhook` | unauthenticated (Plex cannot be assumed to send credentials) | `plex-server`, unverified |
+| `POST /webhook/{token}` | `WEBHOOK_TOKEN` in the URL path, when it is set | `plex-server`, unverified |
+| `POST /webhook` | unauthenticated when `WEBHOOK_TOKEN` is unset; otherwise always 404 | `plex-server`, unverified; a denied request is anonymous |
 | `GET /rooms`, `GET /rooms/{room}/lights`, `GET /clients`, `POST /rooms/validate`, `POST /rooms/reload` | `Authorization: Bearer <ADMIN_API_TOKEN>` | `owner-admin`, verified |
 
 Missing or wrong credentials return 401; an unset or shorter-than-16-character
@@ -98,15 +118,53 @@ curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:9800/r
 What this establishes: the caller holds the shared secret (`owner-admin` is a
 client identity, not a named person). Request-supplied actor headers,
 `X-Forwarded-*` and Plex `Account.title`/`Player` fields are never used for
-identity; `plex-server` is a label for the unauthenticated webhook route and
-proves nothing about who sent it (any local process can post). Webhooks stay
-unauthenticated until a Plex-compatible mechanism is chosen. Denied requests
-are counted in `plex_webhook_admin_denials_total{reason}` and audited with
-fixed reason codes (`missing_credential`, `invalid_credential`,
-`auth_unconfigured`), capped at 20 audit rows per minute; no attempted token,
-header, IP or body is stored. `/metrics` labels carry only fixed or
+identity; `plex-server` is a label for the webhook route and proves nothing
+about who sent it. Without `WEBHOOK_TOKEN`, any caller that can reach the
+service (see [Who can reach the service](#who-can-reach-the-service)) can post
+a webhook. Denied admin requests are counted in
+`plex_webhook_admin_denials_total{reason}` and audited with fixed reason codes
+(`missing_credential`, `invalid_credential`, `auth_unconfigured`). Denied
+admin and webhook requests share one cap of 20 audit rows per minute; every
+one is still counted. No attempted token, header, IP or body is stored. `/metrics` labels carry only fixed or
 configured values (see Phase 2 below), never Plex-supplied names. Rotation: change `ADMIN_API_TOKEN` in `.env` and
 redeploy; there is no live rotation.
+
+### Webhook token
+
+Plex sends no credential with a webhook, but it accepts any webhook URL, so a
+secret in the URL is how the webhook authenticates. To turn it on:
+
+1. Generate a token. It must be at least 32 characters from `A-Z`, `a-z`,
+   `0-9`, `-`, `_`, `.` and `~`:
+   `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+2. Set `WEBHOOK_TOKEN` in `.env` and recreate the container:
+   `docker compose up -d`.
+3. In Plex (Settings → Account → Webhooks), replace the webhook URL with
+   `http://127.0.0.1:9800/webhook/<WEBHOOK_TOKEN>` and save. Plex delivers to the
+   new URL from then on.
+
+With the token set, only `POST /webhook/<WEBHOOK_TOKEN>` is accepted. The
+token goes in the path only; a `?token=` query is not accepted. A request with
+no token or a wrong one gets **404** `{"detail":"Not Found"}`, the same answer
+as a route that does not exist, before its body is read. It stores no `events`
+row and runs no light action. It is counted in
+`plex_webhook_rejected_requests_total{reason="invalid_token"}` and audited as
+`webhook.receipt` `denied/invalid_token` with an anonymous actor, within the
+shared cap above.
+
+The token is read from the environment once at startup and kept only as a
+digest. The comparison runs in constant time. The token never appears in
+responses, audit rows or metrics, and the access log shows webhook paths as
+`/webhook/[redacted]`. A value shorter than 32 characters, or one with other
+characters, stops the service at startup with an error that does not include
+it. When `WEBHOOK_TOKEN` is unset or empty, `POST /webhook` takes any request
+as before, `/webhook/{token}` answers 404, and startup logs a warning
+(`reason=webhook_token_unset`).
+
+Rotation: change `WEBHOOK_TOKEN` in `.env`, recreate the container and update
+the Plex URL; deliveries fail with 404 between those two steps. Rollback: unset
+`WEBHOOK_TOKEN`, recreate the container and point Plex back at
+`http://127.0.0.1:9800/webhook`.
 
 Both room operations read the same file (`ROOMS_CONFIG_PATH`, default
 `/config/rooms.yaml`). Validation returns HTTP 200 with
@@ -170,8 +228,8 @@ retention command below, so its old lines age out.
 
 ### Request and storage bounds
 
-`POST /webhook` is unauthenticated, so one request is bounded before it is
-parsed or stored. Over-limit requests get **413**, are counted in
+The webhook may be unauthenticated (see Webhook token), so one request is
+bounded before it is parsed or stored. Over-limit requests get **413**, are counted in
 `plex_webhook_rejected_requests_total{reason}` and persist nothing.
 
 | Bound | Value | `reason` |

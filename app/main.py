@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -48,6 +49,38 @@ class _BodyTooLarge(Exception):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("plex-webhook")
 
+# The access log records each request path; anything after /webhook can carry the token.
+_WEBHOOK_SUFFIX = re.compile(r"(/webhook)([/?])[^\s\"]+")
+
+
+def _redact(value):
+    return _WEBHOOK_SUFFIX.sub(r"\1\2[redacted]", value) if isinstance(value, str) else value
+
+
+def _redact_webhook_paths(record):
+    """Logging filter: replace what follows /webhook in an access-log record with a placeholder."""
+    record.msg = _redact(record.msg)
+    if isinstance(record.args, tuple):
+        record.args = tuple(_redact(arg) for arg in record.args)
+    elif isinstance(record.args, dict):
+        record.args = {key: _redact(arg) for key, arg in record.args.items()}
+    return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_redact_webhook_paths)
+
+
+def _webhook_token_digest():
+    """Read WEBHOOK_TOKEN once at startup; an unusable value stops the service."""
+    digest = auth.webhook_token_digest()
+    if digest is None:
+        logger.warning("reason=webhook_token_unset: POST /webhook accepts any caller that can reach the "
+                       "service; set WEBHOOK_TOKEN (see README, Route permissions)")
+    return digest
+
+
+WEBHOOK_TOKEN_DIGEST = _webhook_token_digest()
+
 db_conn = get_connection()
 
 # Event names Plex documents for webhooks. Payloads are unauthenticated, so every
@@ -89,7 +122,7 @@ if "AUDIT_FAILURES_TOTAL" not in globals():
 if "WEBHOOK_REJECTED_TOTAL" not in globals():
     WEBHOOK_REJECTED_TOTAL = Counter("plex_webhook_rejected_requests_total",
                                      "Webhook requests rejected before storage", ["reason"])
-for _reason in ("body_too_large", "too_many_fields", "too_many_files", "field_too_large"):
+for _reason in ("body_too_large", "too_many_fields", "too_many_files", "field_too_large", "invalid_token"):
     WEBHOOK_REJECTED_TOTAL.labels(reason=_reason)
 if "UNLISTED_SERVER_EVENTS_TOTAL" not in globals():
     UNLISTED_SERVER_EVENTS_TOTAL = Counter("plex_webhook_unlisted_server_events_total",
@@ -283,6 +316,33 @@ async def validate_rooms(request: Request):
 @app.post("/webhook")
 async def plex_webhook(request: Request):
     correlation = audit.correlation_id()
+    if WEBHOOK_TOKEN_DIGEST is not None:
+        _reject_webhook_token(correlation)
+    return await _receive_webhook(request, correlation)
+
+
+@app.post("/webhook/{token}")
+async def plex_webhook_with_token(token: str, request: Request):
+    """The webhook with WEBHOOK_TOKEN as the last path segment; without a configured token it does not exist."""
+    if WEBHOOK_TOKEN_DIGEST is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    correlation = audit.correlation_id()
+    if not auth.webhook_token_matches(token, WEBHOOK_TOKEN_DIGEST):
+        _reject_webhook_token(correlation)
+    return await _receive_webhook(request, correlation)
+
+
+def _reject_webhook_token(correlation):
+    """404, as for a route that does not exist, before the body is read. Nothing is stored or dispatched."""
+    WEBHOOK_REJECTED_TOTAL.labels(reason="invalid_token").inc()
+    logger.warning("reason=webhook_rejected code=invalid_token")
+    if _denial_audit_allowed():
+        _record_audit(action="webhook.receipt", outcome="denied", reason_code="invalid_token",
+                      correlation=correlation)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+async def _receive_webhook(request, correlation):
     declared = request.headers.get("content-length")
     if declared is not None:
         if not declared.isdigit():

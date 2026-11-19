@@ -14,7 +14,7 @@ _SCRATCH = Path(tempfile.mkdtemp(prefix="plex-webhook-tests-"))
 os.environ["DB_PATH"] = str(_SCRATCH / "data" / "plex_events.db")
 os.environ["ROOMS_CONFIG_PATH"] = str(_SCRATCH / "rooms.yaml")
 os.environ["DEVICES_SECRETS_PATH"] = str(_SCRATCH / "devices.secrets.yaml")
-for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY"):
+for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "WEBHOOK_TOKEN"):
     os.environ.pop(_name, None)
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
@@ -136,13 +136,41 @@ def memory_db():
 
 
 ADMIN_TOKEN = "synthetic-admin-token-0123456789"
+WEBHOOK_TOKEN = "synthetic-webhook-token-0123456789abcdef"
+
+# Modules whose tests also run with WEBHOOK_TOKEN set: every `client` webhook post
+# then goes to /webhook/<token>, so the same journeys prove the tokened route.
+TOKEN_JOURNEY_MODULES = {
+    "test_admin_auth", "test_audit_http", "test_expiry", "test_govee_http", "test_light_audit", "test_main",
+    "test_media_types", "test_playback_http",
+}
+
+
+def pytest_generate_tests(metafunc):
+    if "client" in metafunc.fixturenames and metafunc.module.__name__.rpartition(".")[2] in TOKEN_JOURNEY_MODULES:
+        metafunc.parametrize("client", ["no_token", "token"], indirect=True)
+
+
+def _token_test_client():
+    from fastapi.testclient import TestClient
+
+    class TokenClient(TestClient):
+        """Sends POST /webhook to /webhook/<token>; every other request is unchanged."""
+
+        def request(self, method, url, *args, **kwargs):
+            if method.upper() == "POST" and url == "/webhook":
+                url = f"/webhook/{WEBHOOK_TOKEN}"
+            return super().request(method, url, *args, **kwargs)
+
+    return TokenClient
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch, registry, light_calls):
+def client(request, tmp_path, monkeypatch, registry, light_calls):
     from fastapi.testclient import TestClient
     import app.db
     import app.main as main
+    from app import auth
 
     # TestClient runs handlers in another thread; production audit writers own
     # their connections instead of sharing this legacy test connection.
@@ -152,6 +180,10 @@ def client(tmp_path, monkeypatch, registry, light_calls):
     monkeypatch.setitem(main._denial_window, "start", 0.0)
     monkeypatch.setitem(main._denial_window, "count", 0)
     monkeypatch.setattr(main, "db_conn", conn)
+    if getattr(request, "param", "no_token") == "token":
+        monkeypatch.setenv("WEBHOOK_TOKEN", WEBHOOK_TOKEN)
+        monkeypatch.setattr(main, "WEBHOOK_TOKEN_DIGEST", auth.webhook_token_digest())
+        TestClient = _token_test_client()
     with TestClient(main.app) as c:
         c.admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
         c.headers.update(c.admin)  # webhook posts ignore it; admin routes need it
