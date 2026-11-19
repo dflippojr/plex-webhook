@@ -115,9 +115,12 @@ MIGRATIONS = (
 )
 
 
-def connect(database, *, timeout=BUSY_TIMEOUT_S, uri=False):
-    """A connection with the service's pragmas. It runs no DDL; open_database did that at startup."""
-    conn = sqlite3.connect(database, timeout=timeout, uri=uri)
+def connect(database, *, timeout=None, uri=False):
+    """A connection with the service's pragmas. It runs no DDL; open_database did that at startup.
+
+    timeout is the busy wait in seconds, BUSY_TIMEOUT_S unless given.
+    """
+    conn = sqlite3.connect(database, timeout=BUSY_TIMEOUT_S if timeout is None else timeout, uri=uri)
     # Under WAL, NORMAL syncs at checkpoints instead of on every commit. A power cut can
     # lose the last few commits but leaves the file consistent; a process crash loses none.
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -147,14 +150,46 @@ def migrate(conn):
     An up-to-date file takes no write lock. Each step re-reads the version under the
     write lock, so two processes starting at once never run a step twice. A file from
     newer code (a higher version) is left alone.
+
+    A rollback-journal file that another connection is reading cannot commit. If the
+    file already has everything the pending steps would add (a file from before
+    versioning, whose start-time checks already ran), startup goes on with the version
+    unrecorded and the next start records it. Otherwise the lock error is raised.
     """
     while _user_version(conn) < len(MIGRATIONS):
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            version = _user_version(conn)
-            if version < len(MIGRATIONS):  # else another process ran it since the check above
-                MIGRATIONS[version](conn)
-                conn.execute(f"PRAGMA user_version = {version + 1}")
+        try:
+            _apply_next(conn)
+        except sqlite3.OperationalError as error:
+            conn.rollback()
+            if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or not _pending_steps_change_nothing(conn):
+                raise
+            logger.warning("reason=migration_deferred version=%d", _user_version(conn))
+            return
+
+
+def _apply_next(conn):
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        version = _user_version(conn)
+        if version < len(MIGRATIONS):  # else another process ran it since migrate's check
+            MIGRATIONS[version](conn)
+            conn.execute(f"PRAGMA user_version = {version + 1}")
+
+
+def _pending_steps_change_nothing(conn):
+    """Run the pending steps and roll them back: True if they changed no schema and no rows."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        before = (_schema_version(conn), conn.total_changes)
+        for step in MIGRATIONS[_user_version(conn):]:
+            step(conn)
+        return (_schema_version(conn), conn.total_changes) == before
+    finally:
+        conn.rollback()
+
+
+def _schema_version(conn):
+    return conn.execute("PRAGMA schema_version").fetchone()[0]
 
 
 def _user_version(conn):

@@ -262,7 +262,19 @@ events, the light restore records and the [audit trail](docs/audit.md).
   the file cannot switch (another process holds it open, or it sits on a
   network filesystem, where WAL does not work), the service logs
   `reason=wal_unavailable`, keeps running in the old rollback-journal mode and
-  tries again on the next start. Keep `data/` on a local disk.
+  tries again on the next start. Keep `data/` on a local disk. In that mode a
+  reader still blocks writes, migrations included; see the next point.
+- **First upgrade: close readers first.** Stop the audit CLI and any other tool
+  that has `plex_events.db` open before the first start of this release, so the
+  file can switch to WAL and record its version. If a reader still holds the
+  file, startup waits out two 5-second lock timeouts and logs
+  `reason=wal_unavailable`. A file the previous release last opened already has
+  every table, index and column the migrations add, so the service logs
+  `reason=migration_deferred version=0`, runs on that schema and records the
+  version on the next start with the reader gone. A file from a release that
+  never added `raw_truncated`, `attachments` or `detail` still needs a column
+  added, so startup fails with `database is locked` (that release failed the same
+  way). Close the reader and start again.
 - **Sidecar files.** WAL keeps `plex_events.db-wal` and `plex_events.db-shm`
   beside the database. Recent commits live in the `-wal` file, so never back up
   or move `plex_events.db` alone; use the backup in
