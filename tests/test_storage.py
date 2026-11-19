@@ -89,7 +89,7 @@ OLD_SCHEMA = (
 EVENT_COLUMNS = ("id", "received_at", "event", "account_title", "player_title", "player_uuid", "media_type",
                  "title", "grandparent_title", "rating_key", "raw_payload")
 AUDIT_COLUMNS = ("id", *audit.RECORD_COLUMNS)
-DDL = re.compile(r"^\s*(CREATE|ALTER|DROP)\b|PRAGMA\s+(table_info|user_version|journal_mode)", re.IGNORECASE)
+DDL = re.compile(r"^\s*(CREATE|ALTER|DROP)\b|PRAGMA\s+(table_info|user_version|journal_mode\s*=)", re.IGNORECASE)
 
 
 def receipt(path, **kwargs):

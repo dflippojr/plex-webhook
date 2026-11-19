@@ -281,9 +281,11 @@ events, the light restore records and the [audit trail](docs/audit.md).
   [`docs/audit.md`](docs/audit.md#consistent-backup-and-restore). What a shell
   user needs to read the database is under
   [Access the reader needs](docs/audit.md#access-the-reader-needs-wal).
-- **Durability.** Connections use `synchronous=NORMAL`: a power cut can lose the
-  last few commits, but the file stays consistent, and a process crash loses
-  nothing.
+- **Durability.** In WAL mode connections use `synchronous=NORMAL`: a power cut
+  can lose the last few commits, but the file stays consistent, and a process
+  crash loses nothing. SQLite guarantees that only under WAL, so while the file
+  is still in rollback-journal mode (see `reason=wal_unavailable` above) every
+  connection keeps `synchronous=FULL`, as earlier releases did.
 - **Other readers.** Any SQLite 3.7 or later reads a WAL database if it can reach
   both sidecars; a read-only reader needs SQLite 3.22 or later. A tool that opens
   `plex_events.db` (see the media-tracker-sync note in `docs/audit.md`) needs

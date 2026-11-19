@@ -121,10 +121,15 @@ def connect(database, *, timeout=None, uri=False):
     timeout is the busy wait in seconds, BUSY_TIMEOUT_S unless given.
     """
     conn = sqlite3.connect(database, timeout=BUSY_TIMEOUT_S if timeout is None else timeout, uri=uri)
+    _set_synchronous(conn, conn.execute("PRAGMA journal_mode").fetchone()[0])
+    return conn
+
+
+def _set_synchronous(conn, mode):
     # Under WAL, NORMAL syncs at checkpoints instead of on every commit. A power cut can
     # lose the last few commits but leaves the file consistent; a process crash loses none.
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    # SQLite gives that guarantee only under WAL: a rollback-journal file keeps FULL.
+    conn.execute("PRAGMA synchronous=NORMAL" if mode == "wal" else "PRAGMA synchronous=FULL")
 
 
 def enable_wal(conn):
@@ -141,6 +146,7 @@ def enable_wal(conn):
         mode = None
     if mode != "wal":
         logger.warning("reason=wal_unavailable")
+    _set_synchronous(conn, mode)
     return mode
 
 
