@@ -267,3 +267,117 @@ def test_read_only_cli_reads_wal_database_through_sidecars_it_cannot_write(start
         path.parent.chmod(0o755)
         for item in (path, *sidecars):
             item.chmod(0o644)
+
+
+def test_read_only_cli_without_sidecars_needs_a_writable_directory(started):
+    """The documented limit: with the service stopped, the sidecars are gone and a reader must create -shm."""
+    path, service = started
+    receipt(path)
+    service.close()  # the last connection to close removes -wal and -shm
+    assert not path.with_name(path.name + "-shm").exists()
+    path.chmod(0o444)
+    path.parent.chmod(0o555)
+    try:
+        if os.geteuid() != 0:
+            denied = _cli(path, "list")
+            assert denied.returncode == 1
+            assert denied.stderr == "audit_cli_failed: existing readable audit database required\n"
+        # What running as the service's uid gives the reader; sidecars it creates get the file's mode.
+        path.parent.chmod(0o755)
+        path.chmod(0o644)
+        assert _cli(path, "list").returncode == 0
+    finally:
+        path.parent.chmod(0o755)
+        path.chmod(0o644)
+
+
+def test_startup_keeps_working_when_the_file_cannot_switch_to_wal(tmp_path, monkeypatch, caplog):
+    from app import storage
+
+    path = tmp_path / "rollback.db"
+    with sqlite3.connect(path) as conn:
+        storage.migrate(conn)
+    conn.close()
+    reader = sqlite3.connect(path)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM events").fetchone()  # a rollback-mode reader blocks the switch
+    monkeypatch.setattr(storage, "BUSY_TIMEOUT_S", 0.05)
+    try:
+        conn = storage.open_database(path)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+            assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS),)
+            assert "reason=wal_unavailable" in caplog.text
+        finally:
+            conn.close()
+    finally:
+        reader.close()
+    caplog.clear()
+    conn = storage.open_database(path)  # the next start, with the reader gone, switches
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert "wal_unavailable" not in caplog.text
+    finally:
+        conn.close()
+
+
+def test_a_failing_migration_step_leaves_the_file_at_the_previous_version(tmp_path, monkeypatch):
+    from app import storage
+
+    def broken(conn):
+        conn.execute("ALTER TABLE events ADD COLUMN half_done TEXT")
+        raise RuntimeError("step failed")
+
+    path = tmp_path / "partial.db"
+    with monkeypatch.context() as patch, pytest.raises(RuntimeError):
+        patch.setattr(storage, "MIGRATIONS", (*storage.MIGRATIONS, broken))
+        storage.open_database(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS),)
+        assert "half_done" not in _columns(conn, "events")
+    conn.close()
+
+
+def test_a_file_from_newer_code_is_left_at_its_version(tmp_path):
+    from app import storage
+
+    path = tmp_path / "newer.db"
+    storage.open_database(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA user_version = {len(storage.MIGRATIONS) + 5}")
+    conn.close()
+    conn = storage.open_database(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS) + 5,)
+    finally:
+        conn.close()
+
+
+def test_a_step_another_process_finished_meanwhile_is_not_run_again(tmp_path):
+    from app import storage
+
+    path = tmp_path / "race.db"
+    sqlite3.connect(path).close()
+
+    class Racing(sqlite3.Connection):
+        """Another process migrates the file between this connection's version check and its write lock."""
+        raced = False
+
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE" and not Racing.raced:
+                Racing.raced = True
+                other = sqlite3.connect(path)
+                storage.migrate(other)
+                other.close()
+            return super().execute(sql, *args)
+
+    statements = []
+    conn = sqlite3.connect(path, factory=Racing)
+    conn.set_trace_callback(statements.append)
+    try:
+        storage.migrate(conn)
+        assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS),)
+    finally:
+        conn.close()
+    assert Racing.raced
+    assert [statement for statement in statements if DDL.search(statement) and "user_version" not in statement] == []

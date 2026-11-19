@@ -144,3 +144,33 @@ items:
       `fail_under` in `.coveragerc` first.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: sqlite-wal-migrations
+    kind: feature
+    status: done
+    issue: 180
+    title: "Storage: SQLite WAL and versioned migrations"
+    body: |
+      From the 2026-11-17 architecture review. The database ran in rollback-journal
+      mode, so an open reader (the audit CLI, a backup) made audit appends fail after
+      250 ms and webhook inserts fail after 5 s. Schema checks ran on hot paths and no
+      schema version was recorded.
+
+      Built in #180 (stages 1 and 2): `app/storage.py` switches the file to WAL at
+      startup and applies numbered migrations recorded in `PRAGMA user_version`;
+      per-call connections run no DDL. Stage 3 is `online-retention`.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: online-retention
+    kind: deferred
+    title: "Prune stored events and audit rows without stopping the service"
+    body: |
+      Stage 3 of #180. `audit_cli prune --apply` tells the owner to stop the service
+      first. Under WAL its database part no longer needs that: readers never block, and
+      the service's writers wait for the prune's write lock (the audit append only
+      250 ms, so a long prune could still drop audit records). Decide whether to allow
+      an online prune, for example by deleting in small batches, then update
+      `docs/audit.md` "Retention maintenance" and the CLI's `--apply` help.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.

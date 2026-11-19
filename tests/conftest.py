@@ -135,19 +135,26 @@ def memory_db():
     conn.close()
 
 
+def migrated(conn):
+    """Bring a test connection's file to the latest schema, as service startup does."""
+    from app import storage
+
+    storage.migrate(conn)
+    return conn
+
+
 ADMIN_TOKEN = "synthetic-admin-token-0123456789"
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch, registry, light_calls):
     from fastapi.testclient import TestClient
-    import app.db
     import app.main as main
 
     # TestClient runs handlers in another thread; production audit writers own
     # their connections instead of sharing this legacy test connection.
     conn = sqlite3.connect(tmp_path / "events.db", check_same_thread=False)
-    conn.executescript(app.db.SCHEMA)
+    migrated(conn)
     monkeypatch.setenv("ADMIN_API_TOKEN", ADMIN_TOKEN)
     monkeypatch.setitem(main._denial_window, "start", 0.0)
     monkeypatch.setitem(main._denial_window, "count", 0)

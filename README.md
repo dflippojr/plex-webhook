@@ -9,7 +9,8 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#2](https://github.com/dflippojr/plex-webhook/issues/2) wire live `rooms.yaml` and device credentials, then dim on real playback
 - [#3](https://github.com/dflippojr/plex-webhook/issues/3) verify Govee LAN control against a real bulb (blocked on #2)
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
-- remove the legacy `events.jsonl` pruning code one release after #183 stopped writing the log (backlog `remove-events-jsonl-prune`, not filed yet)
+- [#189](https://github.com/dflippojr/plex-webhook/issues/189) remove the legacy `events.jsonl` pruning code one release after #183 stopped writing the log
+- prune stored events and audit rows without stopping the service, now that the database runs in WAL mode (backlog `online-retention`, not filed yet)
 
 The next planned steps are those three hardware checks; they need the owner's devices
 and accounts.
@@ -243,6 +244,43 @@ The benchmark imports only `app.db`, creates synthetic 10k/100k histories with
 1,024-byte raw payloads in system temp, and cleans up afterwards. It accepts no
 existing database path and never starts the app. Results vary by environment;
 CI checks correctness and query plans without timing thresholds.
+
+### Storage: WAL and schema migrations
+
+One SQLite file (`DB_PATH`, `./data/plex_events.db` on the host) holds the
+events, the light restore records and the [audit trail](docs/audit.md).
+`app/storage.py` owns it.
+
+- **Migrations.** Startup applies numbered migrations and records the last one
+  in `PRAGMA user_version`. A database from an earlier release (version 0)
+  upgrades as it did before: missing tables and indexes are created, the
+  replaced seeding indexes are dropped, and `events.raw_truncated`,
+  `events.attachments` and `audit_events.detail` are added if missing. Rows are
+  kept. Webhook, audit and restore-record writes run no DDL.
+- **WAL.** Startup puts the file in WAL mode, so a reader (the audit CLI, a
+  backup, `list` paused in a pager) never blocks a webhook or audit write. If
+  the file cannot switch (another process holds it open, or it sits on a
+  network filesystem, where WAL does not work), the service logs
+  `reason=wal_unavailable`, keeps running in the old rollback-journal mode and
+  tries again on the next start. Keep `data/` on a local disk.
+- **Sidecar files.** WAL keeps `plex_events.db-wal` and `plex_events.db-shm`
+  beside the database. Recent commits live in the `-wal` file, so never back up
+  or move `plex_events.db` alone; use the backup in
+  [`docs/audit.md`](docs/audit.md#consistent-backup-and-restore). What a shell
+  user needs to read the database is under
+  [Access the reader needs](docs/audit.md#access-the-reader-needs-wal).
+- **Durability.** Connections use `synchronous=NORMAL`: a power cut can lose the
+  last few commits, but the file stays consistent, and a process crash loses
+  nothing.
+- **Other readers.** Any SQLite 3.7 or later reads a WAL database if it can reach
+  both sidecars; a read-only reader needs SQLite 3.22 or later. A tool that opens
+  `plex_events.db` (see the media-tracker-sync note in `docs/audit.md`) needs
+  that access too.
+- **Rollback.** An earlier release runs on the WAL file unchanged. To convert the
+  file back to rollback-journal mode, stop the service and run, as uid 10001,
+  `python -c "import sqlite3; print(sqlite3.connect('/path/to/plex-webhook/data/plex_events.db').execute('PRAGMA journal_mode=DELETE').fetchone()[0])"`
+  (it prints `delete`). This release switches the file back to WAL on its next
+  start.
 
 ## Phase 3 — room-based light dispatcher
 

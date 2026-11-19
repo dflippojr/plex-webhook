@@ -29,6 +29,7 @@ rooms:
 """, encoding="utf-8")
     registry.reload()
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "restore.db")
+    db.get_connection().close()  # startup migrates the file; restore-record calls run no DDL
     monkeypatch.setattr(lights, "_secrets_cache", {})
     monkeypatch.setenv("GOVEE_API_KEY", "synthetic-cloud-key")
     # Explicitly undo all three light backend recorders from the client fixture.
