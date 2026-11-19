@@ -361,6 +361,54 @@ def test_first_upgrade_starts_on_the_existing_schema_while_a_reader_holds_the_fi
         conn.close()
 
 
+def _pragmas(conn):
+    return conn.execute("PRAGMA journal_mode").fetchone()[0], conn.execute("PRAGMA synchronous").fetchone()[0]
+
+
+def test_sync_stays_full_unless_the_file_is_in_wal_on_startup_and_later_connections(tmp_path, monkeypatch):
+    from app import storage
+
+    path = tmp_path / "data" / "plex_events.db"
+    path.parent.mkdir()
+    _legacy_database(path, MASTER_SCHEMA)
+    monkeypatch.setattr(storage, "BUSY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    later = []
+    connect = storage.connect
+
+    def recording_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        later.append(_pragmas(conn))
+        return conn
+
+    def open_later_connections():
+        later.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(storage, "connect", recording_connect)
+            receipt(path)  # the audit append's own connection
+            assert db.get_restore_record("room_a", "light-1") is not None  # the restore helper's connection
+        return later
+
+    reader = _hold_read_lock(path)
+    try:
+        service = db.get_connection()  # the reader keeps the file in rollback-journal mode
+    finally:
+        reader.close()
+    try:
+        # SQLite only keeps a file consistent under NORMAL in WAL mode: DELETE mode needs FULL (2).
+        assert _pragmas(service) == ("delete", 2)
+        assert open_later_connections() == [("delete", 2), ("delete", 2)]
+    finally:
+        service.close()
+
+    service = db.get_connection()  # the next start switches to WAL, where NORMAL (1) is safe
+    try:
+        assert _pragmas(service) == ("wal", 1)
+        assert open_later_connections() == [("wal", 1), ("wal", 1)]
+    finally:
+        service.close()
+
+
 def test_first_upgrade_that_must_add_a_column_fails_while_a_reader_holds_the_file(tmp_path, monkeypatch):
     from app import storage
 
