@@ -37,8 +37,8 @@ def _rejected_count():
 
 
 def _raw_post(client, url, body):
-    """POST without the token client's /webhook rewrite."""
-    return TestClient.request(client, "POST", url, data={"payload": json.dumps(body)})
+    """POST without the token client's /webhook rewrite, and without following a redirect."""
+    return TestClient.request(client, "POST", url, data={"payload": json.dumps(body)}, follow_redirects=False)
 
 
 def _stored_events(client):
@@ -52,13 +52,19 @@ def _stored_events(client):
     f"/webhook/{WEBHOOK_TOKEN[:-1]}",        # one character short
     f"/webhook/{WEBHOOK_TOKEN}x",            # one character long
     f"/webhook?token={WEBHOOK_TOKEN}",       # the query form is not accepted
-], ids=["missing", "wrong", "prefix", "suffix", "query"])
+    "/webhook/",                             # empty token
+    f"/webhook/{WEBHOOK_TOKEN}/",            # trailing slash: no redirect that would echo the path
+    f"/webhook/{WRONG}/",
+    f"/webhook/{WEBHOOK_TOKEN}/extra",       # extra segment
+    "/webhook/a/b",
+], ids=["missing", "wrong", "prefix", "suffix", "query", "empty", "slash", "wrong-slash", "extra", "nested"])
 def test_missing_or_wrong_token_is_404_and_stores_nothing(client, light_calls, caplog, url):
     caplog.set_level(logging.DEBUG)
     before = _rejected_count()
     response = _raw_post(client, url, payload("media.play"))
     drain()
     assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
+    assert "location" not in response.headers
     assert _stored_events(client) == 0 and light_calls == []
     receipts = [r for r in rows(client) if r["action"] == "webhook.receipt"]
     assert len(receipts) == 1
@@ -119,7 +125,10 @@ def test_without_a_token_the_tokened_route_does_not_exist(client, light_calls):
     # No audit row was written: the trail's table was never even created.
     assert client.conn.execute("SELECT name FROM sqlite_master WHERE name = 'audit_events'").fetchone() is None
     assert _rejected_count() == before
-    # The untokened route keeps today's behaviour.
+    assert client.post("/webhook/a/b", data={}).status_code == 404
+    # The untokened route keeps today's behaviour, including the trailing-slash redirect.
+    redirect = client.post("/webhook/?x=1", data={}, follow_redirects=False)
+    assert redirect.status_code == 307 and redirect.headers["location"] == "http://testserver/webhook?x=1"
     assert client.post("/webhook", data={"payload": json.dumps(payload("media.play"))}).status_code == 200
 
 

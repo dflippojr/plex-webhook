@@ -29,20 +29,19 @@ docker compose up -d --build
 
 #### Who can reach the service
 
-The compose file publishes the service port on the host's loopback only
-(`127.0.0.1:9800`), for Plex Media Server on the same host. That mapping is not
-the only way in. Inside the container the service listens on all interfaces
-(port 8000), and the container also joins the external Docker network named in
-`docker-compose.yml`, which the monitoring stack uses to scrape `/metrics`.
-So these callers can reach every route (`/webhook`, `/metrics`, `/health` and the
-admin routes):
+The compose file publishes the service on the host's loopback only
+(`127.0.0.1:9800`), for Plex Media Server on the same host, and publishes no LAN
+port. The loopback mapping is not the only way in, though. Two groups of callers
+can reach the service:
 
-- any process on the host, through the loopback mapping;
-- any container attached to that shared Docker network, directly on port 8000.
+- processes on the host, through the loopback mapping;
+- other containers on the Docker network the service shares with the
+  monitoring stack (it is there for the `/metrics` scrape), which reach the
+  container directly.
 
-Nothing else on the LAN can reach it unless you change the port mapping. The
-admin routes always need `ADMIN_API_TOKEN`. The webhook needs a secret only when
-`WEBHOOK_TOKEN` is set, so set it (see [Webhook token](#webhook-token)).
+The admin routes always need `ADMIN_API_TOKEN`. The webhook needs a secret only
+when `WEBHOOK_TOKEN` is set, so set it (see [Webhook token](#webhook-token)).
+`/health` and `/metrics` stay open to both groups.
 
 Dependencies install from `requirements.lock`, which locks every
 transitive package with hashes. After editing the direct pins in

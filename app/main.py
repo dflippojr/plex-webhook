@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import threading
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
@@ -321,10 +321,17 @@ async def plex_webhook(request: Request):
     return await _receive_webhook(request, correlation)
 
 
-@app.post("/webhook/{token}")
+@app.post("/webhook/{token:path}")
 async def plex_webhook_with_token(token: str, request: Request):
-    """The webhook with WEBHOOK_TOKEN as the last path segment; without a configured token it does not exist."""
+    """The webhook with WEBHOOK_TOKEN as the rest of the path; without a configured token it does not exist.
+
+    The whole remainder, empty or with slashes, is compared, so no path under /webhook/ reaches the
+    router's trailing-slash redirect, which would echo the presented value in its Location header.
+    """
     if WEBHOOK_TOKEN_DIGEST is None:
+        if not token:
+            # Unset token: POST /webhook/ keeps the redirect to /webhook it got before this route existed.
+            return RedirectResponse(request.url.replace(path="/webhook"), status_code=307)
         raise HTTPException(status_code=404, detail="Not Found")
     correlation = audit.correlation_id()
     if not auth.webhook_token_matches(token, WEBHOOK_TOKEN_DIGEST):
