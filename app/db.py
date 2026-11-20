@@ -1,77 +1,20 @@
 import json
 import os
-import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from app import storage
 from app.audit import WRITE_LOCK, utc_now
 
 DB_PATH = Path(os.environ.get("DB_PATH", "/data/plex_events.db"))
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    received_at TEXT NOT NULL,
-    event TEXT,
-    account_title TEXT,
-    player_title TEXT,
-    player_uuid TEXT,
-    media_type TEXT,
-    title TEXT,
-    grandparent_title TEXT,
-    rating_key TEXT,
-    raw_payload TEXT NOT NULL,
-    raw_truncated INTEGER NOT NULL DEFAULT 0,
-    attachments TEXT
-);
-CREATE TABLE IF NOT EXISTS light_restore_records (
-    room TEXT NOT NULL,
-    light_id TEXT NOT NULL,
-    was_off INTEGER NOT NULL CHECK(was_off IN (0, 1)),
-    restore_percent INTEGER,
-    dim_percent INTEGER NOT NULL,
-    recorded_at TEXT NOT NULL,
-    PRIMARY KEY (room, light_id)
-);
-CREATE TABLE IF NOT EXISTS automation_room_owners (
-    target_room TEXT PRIMARY KEY,
-    trigger_room TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
-CREATE INDEX IF NOT EXISTS idx_events_received_at ON events(received_at);
--- Replaced by idx_events_player_labels_cover: plain columns let the counter re-seed
--- read only the index, where the old expression index still looked up every row,
--- and player_uuid lets the re-seed resolve rooms by uuid the way dispatch does.
-DROP INDEX IF EXISTS idx_events_counts_cover;
-DROP INDEX IF EXISTS idx_events_labels_cover;
-CREATE INDEX IF NOT EXISTS idx_events_player_labels_cover
-    ON events(event, player_title, player_uuid, account_title);
-CREATE INDEX IF NOT EXISTS idx_events_clients_cover
-    ON events(player_title, player_uuid, received_at)
-    WHERE player_title IS NOT NULL;
-"""
-
-
-# Columns added to events after its first release, as (name, statement that adds it).
-LATER_COLUMNS = (
-    ("raw_truncated", "ALTER TABLE events ADD COLUMN raw_truncated INTEGER NOT NULL DEFAULT 0"),
-    ("attachments", "ALTER TABLE events ADD COLUMN attachments TEXT"),
-)
+# The events and restore-record tables as one script; app.storage owns the DDL and its migrations.
+SCHEMA = storage.EVENTS_SCHEMA
 
 
 def get_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    # Databases created before the stored-size cap or before attachments moved out of
-    # events.jsonl lack these columns. Existing rows keep NULL attachments: unknown.
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
-    for name, statement in LATER_COLUMNS:
-        if name not in columns:
-            conn.execute(statement)
-            conn.commit()
-    return conn
-
+    """The service's startup connection: enables WAL and applies pending migrations (app.storage)."""
+    return storage.open_database(DB_PATH)
 
 
 # Payload values insert_event stores, as (group, field names), in the order of their
@@ -155,13 +98,12 @@ def list_known_clients(conn):
 
 # --- light restore records ----------------------------------------------------
 # One row per (room, light) between a dim and its restore. Each call owns its
-# connection so the light-action worker never shares the request connection.
+# connection so the light-action worker never shares the request connection. The
+# tables exist already: startup's get_connection migrated the file.
 
 
 def _restore_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=5)
-    conn.executescript(SCHEMA)
-    return conn
+    return storage.connect(DB_PATH)
 
 
 def get_restore_record(room, light_id):

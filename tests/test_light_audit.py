@@ -14,7 +14,7 @@ import requests
 from prometheus_client import REGISTRY
 
 from app import audit, audit_cli, dispatcher, lights
-from conftest import drain, payload, post, records, rows
+from conftest import drain, migrated, payload, post, records, rows
 
 REAL_APPLY_ACTION = lights.apply_action
 SENTINEL = "synthetic-secret-sentinel"
@@ -297,7 +297,7 @@ def test_backend_that_returns_nothing_is_unconfirmed(client):
 def test_queued_only_row_stays_incomplete_and_is_not_replayed(tmp_path):
     path = tmp_path / "audit.db"
     import sqlite3
-    sqlite3.connect(path).close()
+    migrated(sqlite3.connect(path)).close()
     correlation = audit.correlation_id()
     action_id = audit.correlation_id()
     audit.append(path, action="light.action_queued", outcome="queued", reason_code="accepted",
@@ -312,7 +312,7 @@ def test_queued_only_row_stays_incomplete_and_is_not_replayed(tmp_path):
 def test_audit_rejects_free_text_and_unknown_detail(tmp_path):
     path = tmp_path / "audit.db"
     import sqlite3
-    sqlite3.connect(path).close()
+    migrated(sqlite3.connect(path)).close()
     base = {"action_id": audit.correlation_id(), "request": "dim", "on_behalf_of": "plex_server",
             "brand": "govee", "transport": "lan", "credential_source": "none", "progress": [], "attempts": []}
     call = dict(action="light.result", outcome="command_sent", reason_code="lan_command_sent",
