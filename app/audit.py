@@ -1,39 +1,20 @@
-"""Append contract for safe audit records; no app, device or payload imports.
+"""Append contract for safe audit records; no device or payload imports, and of app only app.storage.
 
 Every append owns its connection. Callers must handle failures without retrying
 their side effects. There is deliberately no update/delete API here.
 """
 import hashlib
 import json
-import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS audit_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recorded_at TEXT NOT NULL,
-    correlation_id TEXT NOT NULL,
-    source TEXT NOT NULL,
-    actor_kind TEXT NOT NULL,
-    actor_id TEXT,
-    actor_verified INTEGER NOT NULL CHECK(actor_verified IN (0, 1)),
-    action TEXT NOT NULL,
-    target_kind TEXT NOT NULL,
-    target_id TEXT,
-    outcome TEXT NOT NULL,
-    reason_code TEXT NOT NULL,
-    changed_fields TEXT NOT NULL,
-    checksum TEXT NOT NULL,
-    detail TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(recorded_at);
-CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id, id);
-CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, id);
-"""
+from app import storage
+
+# The audit table as one script; app.storage owns the DDL and its migrations.
+SCHEMA = storage.AUDIT_SCHEMA
 
 # Only fixed vocabulary, generated UUIDs, numeric legacy event IDs and counts
 # enter the trail. Plex account/client claims are deliberately omitted in v1.
@@ -261,18 +242,15 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     record["checksum"] = checksum(record)
     record["changed_fields"] = json.dumps(changes, sort_keys=True, separators=(",", ":"))
     detail_json = json.dumps(cleaned_detail, sort_keys=True, separators=(",", ":")) if cleaned_detail else None
-    # mode=rw prevents accidentally creating a second database after a bad path.
+    # mode=rw prevents accidentally creating a second database after a bad path. The table
+    # and its detail column exist already: service startup migrated the file (app.storage).
     uri = Path(path).resolve().as_uri() + "?mode=rw"
-    with WRITE_LOCK, closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as conn:
-        conn.executescript(SCHEMA)
-        if not has_detail_column(conn):
-            conn.execute("ALTER TABLE audit_events ADD COLUMN detail TEXT")  # table predates light records
-        with conn:
-            cursor = conn.execute(
-                """INSERT INTO audit_events (
-                    recorded_at, correlation_id, source, actor_kind, actor_id, actor_verified,
-                    action, target_kind, target_id, outcome, reason_code, changed_fields, checksum, detail
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                tuple(record[key] for key in RECORD_COLUMNS) + (detail_json,),
-            )
-        return cursor.lastrowid
+    with WRITE_LOCK, closing(storage.connect(uri, uri=True, timeout=0.25)) as conn, conn:
+        cursor = conn.execute(
+            """INSERT INTO audit_events (
+                recorded_at, correlation_id, source, actor_kind, actor_id, actor_verified,
+                action, target_kind, target_id, outcome, reason_code, changed_fields, checksum, detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tuple(record[key] for key in RECORD_COLUMNS) + (detail_json,),
+        )
+    return cursor.lastrowid

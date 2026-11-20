@@ -1,8 +1,8 @@
 # Owner audit review
 
-The existing SQLite database gains `audit_events` on the first audit append
-(normally service startup). Existing events, counters and indexes are preserved;
-there is no backfill from raw payloads. No audit HTTP endpoint exists. Review and
+Service startup creates `audit_events` in the existing SQLite database through
+the numbered schema migrations (README "Storage"). Existing events, counters and
+indexes are preserved; there is no backfill from raw payloads. No audit HTTP endpoint exists. Review and
 export are available only to the filesystem-authorized owner through the offline
 CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
 
@@ -58,12 +58,13 @@ filenames, headers, IP addresses, media titles, tokens or exception strings.
 ## Read and export
 
 Python 3.12 with the repository available is sufficient; this CLI uses only the
-standard library and `app.audit`. It does not import/start the web service,
-dispatcher, config loader or light controllers. Supply the database explicitly:
+standard library, `app.audit` and `app.storage`. It does not import/start the web
+service, dispatcher, config loader or light controllers. Supply the database
+explicitly (replace `/path/to/plex-webhook` with the repository checkout):
 
-```powershell
-python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/plex_events.db' list --limit 100
-python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/plex_events.db' export --action rooms.reload --since '2026-10-08T00:00:00Z' --until '2026-10-09T00:00:00Z' --limit 1000
+```sh
+python -m app.audit_cli --db /path/to/plex-webhook/data/plex_events.db list --limit 100
+python -m app.audit_cli --db /path/to/plex-webhook/data/plex_events.db export --action rooms.reload --since 2026-10-08T00:00:00Z --until 2026-10-09T00:00:00Z --limit 1000
 ```
 
 `list` prints compact rows; `export` prints JSONL with every audit field,
@@ -74,7 +75,38 @@ maximum 10,000 per invocation, ascending ID order. `--id`, `--correlation-id`,
 Timestamps require a timezone and normalize to UTC. Paginate using
 `--after-id <last-returned-id>`; newly appended rows may appear in later pages.
 Use a consistent backup for a fixed export snapshot. Keep redirected exports
-private (PowerShell 7 UTF-8 redirection is recommended).
+private, for example by running `umask 077` in the shell first.
+
+### Access the reader needs (WAL)
+
+The database runs in SQLite's WAL mode (README "Storage"), so a reader never
+blocks the service: a `list` paused in a pager or a running backup no longer
+makes webhook or audit writes wait or fail. WAL keeps two sidecar files beside
+the database, `plex_events.db-wal` and `plex_events.db-shm`, and a reader must be
+able to reach them. `data/` and its files belong to the service's uid 10001
+(README "Run"):
+
+- **Service running:** the sidecars exist. A shell user who can read
+  `data/plex_events.db` and both sidecars can run `list`, `export`, the dry-run
+  `prune` and the backup below, without write access (SQLite 3.22 or later;
+  check with `python -c "import sqlite3; print(sqlite3.sqlite_version)"`).
+  SQLite gives the sidecars the database file's permissions.
+- **Service stopped:** the service removed the sidecars when it closed, and a
+  reader has to create `plex_events.db-shm`, so it needs write access to `data/`.
+  Without it the CLI prints `audit_cli_failed: existing readable audit database
+  required`. Run it as uid 10001 instead, for example
+  `sudo -u '#10001' python -m app.audit_cli --db … list`, or start the service
+  first.
+
+Inside the container the CLI already runs as uid 10001 with the right access:
+
+```sh
+docker compose exec -T plex-webhook python -m app.audit_cli --db /data/plex_events.db list --limit 100
+```
+
+Never leave files in `data/` owned by another user: a sidecar the service cannot
+write stops its database writes. (SQLite run as root hands new sidecars to the
+database file's owner.)
 
 ## Light actions
 
@@ -139,8 +171,9 @@ only `reason=audit_write_failed` without exception text and increments
 attempts since process start and resets on restart. Alert on its increase; the
 durable trail will have a gap. There is no replay queue, side-effect retry or
 fabricated completion. Audit uses an independent connection per append with a
-250 ms lock timeout. A lock can cause a lost audit record even though activation
-succeeds. This policy does not make legacy JSONL/SQLite writes fail-open, and
+250 ms lock timeout. In WAL mode readers never hold that lock; only another
+writer holding it longer than 250 ms (for example a `prune --apply` on a running
+service) can cause a lost audit record, even though activation succeeds. This policy does not make legacy JSONL/SQLite writes fail-open, and
 those files are not an atomic transaction with audit.
 
 Application code only appends records. The sole supported deletion path is
@@ -164,10 +197,10 @@ Retention is 90 days. There is **no automatic deletion/job**. Review eligibility
 with a read-only dry run, then stop the service before running the explicit
 writable prune. Arrange the shutdown/restart yourself in a maintenance window.
 
-```powershell
-python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/plex_events.db' prune
-# After the service is stopped and a consistent backup is saved:
-python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/plex_events.db' prune --apply
+```sh
+python -m app.audit_cli --db /path/to/plex-webhook/data/plex_events.db prune
+# After the service is stopped and a consistent backup is saved, as the service's uid:
+sudo -u '#10001' python -m app.audit_cli --db /path/to/plex-webhook/data/plex_events.db prune --apply
 ```
 
 Only rows with `recorded_at` strictly older than now minus 90 days are deleted;
@@ -189,29 +222,48 @@ the service running.
 
 ## Consistent backup and restore
 
-Use SQLite's backup API, not a live file copy; it includes committed SQLite
-state consistently even with journal/WAL sidecars. Save a new filename with
-owner-only permissions. From the repository, this owner-run command backs up the
-whole database (legacy and audit); it refuses an already existing destination:
+Use SQLite's backup API, not a file copy. Recent commits live in
+`plex_events.db-wal` until a checkpoint moves them into the database file, so a
+copy of `plex_events.db` alone silently loses them; the backup API reads the
+database and its WAL as one consistent snapshot, and it runs while the service
+keeps writing. The reader needs the access described under "Access the reader
+needs (WAL)". Save a new filename with owner-only permissions. From the
+repository, this owner-run command backs up the whole database (legacy and
+audit); it refuses an already existing destination:
 
-```powershell
-python -c "import sqlite3; from pathlib import Path; source=Path('D:/Docker/plex-webhook/data/plex_events.db'); dest=Path('D:/Backups/plex-events-2026-10-08.db'); assert not dest.exists(), 'Choose a new backup filename'; src=sqlite3.connect(source.as_uri()+'?mode=ro', uri=True); dst=sqlite3.connect(dest); src.backup(dst); dst.close(); src.close()"
+```sh
+umask 077
+python -c "import sqlite3; from pathlib import Path; source=Path('/path/to/plex-webhook/data/plex_events.db'); dest=Path('/path/to/backups/plex-events-2026-10-08.db'); assert not dest.exists(), 'Choose a new backup filename'; src=sqlite3.connect(source.as_uri()+'?mode=ro', uri=True); dst=sqlite3.connect(dest); src.backup(dst); dst.close(); src.close()"
 ```
 
-Create `D:/Backups` first with appropriate permissions. A fixture test exercises
-this same SQLite backup/restore API and compares the saved audit rows/checksums.
-For restore, stop the service, preserve the current database and any sidecars
+Create `/path/to/backups` first, readable only by you. Once closed, the backup is
+a single self-contained file with no sidecars. A fixture test exercises this same
+SQLite backup/restore API and compares the saved audit rows/checksums. For restore, stop the service, preserve the current database and any sidecars
 together as a rollback set, then restore via the backup API to a **new** file:
 
-```powershell
-python -c "import sqlite3; from pathlib import Path; source=Path('D:/Backups/plex-events-2026-10-08.db'); dest=Path('D:/Docker/plex-webhook/data/restored.db'); assert not dest.exists(), 'Choose a new restore filename'; src=sqlite3.connect(source.as_uri()+'?mode=ro', uri=True); dst=sqlite3.connect(dest); src.backup(dst); dst.close(); src.close()"
-python -m app.audit_cli --db 'D:/Docker/plex-webhook/data/restored.db' list --limit 10
+```sh
+python -c "import sqlite3; from pathlib import Path; source=Path('/path/to/backups/plex-events-2026-10-08.db'); dest=Path('/path/to/backups/restored.db'); assert not dest.exists(), 'Choose a new restore filename'; src=sqlite3.connect(source.as_uri()+'?mode=ro', uri=True); dst=sqlite3.connect(dest); src.backup(dst); dst.close(); src.close()"
+python -m app.audit_cli --db /path/to/backups/restored.db list --limit 10
+python -c "import sqlite3; print(sqlite3.connect('/path/to/backups/restored.db').execute('PRAGMA integrity_check').fetchone()[0])"
 ```
 
-Verify `PRAGMA integrity_check` on the restored fixture, then, with the service
-still stopped and the old database/sidecars moved aside, rename `restored.db` to
-`plex_events.db`, restore its writable permissions and restart the service.
-Never combine restored files with old `-wal`, `-shm` or `-journal` sidecars.
+The last command prints `ok` for a sound file. Then, with the service still
+stopped, move `plex_events.db` and any `plex_events.db-wal`, `plex_events.db-shm`
+or `plex_events.db-journal` beside it aside together, and put the restored file
+in its place, owned by the service's uid:
+
+```sh
+cd /path/to/plex-webhook/data
+sudo mkdir rollback-2026-10-08
+sudo find . -maxdepth 1 -name 'plex_events.db*' -exec mv -t rollback-2026-10-08/ {} +
+ls rollback-2026-10-08/   # plex_events.db, plus any sidecars
+sudo install -o 10001 -m 600 /path/to/backups/restored.db plex_events.db
+```
+
+Choose the mode for the access you want under "Access the reader needs (WAL)";
+`600` lets only the service read it. Restart the service; startup keeps the file
+in WAL mode. Never combine a restored file with old `-wal`, `-shm` or `-journal`
+sidecars: SQLite would apply the old WAL to the wrong database.
 Restoring an older backup loses all newer audit and legacy SQLite rows; there is
 no separate journal surviving restore. The independent JSONL may then disagree
 with SQLite. Startup after restore records a new load observation, not proof of

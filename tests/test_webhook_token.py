@@ -122,8 +122,8 @@ def test_without_a_token_the_tokened_route_does_not_exist(client, light_calls):
     drain()
     assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
     assert _stored_events(client) == 0 and light_calls == []
-    # No audit row was written: the trail's table was never even created.
-    assert client.conn.execute("SELECT name FROM sqlite_master WHERE name = 'audit_events'").fetchone() is None
+    # No audit row was written. The table exists (storage migrations create it at startup), so check its rows.
+    assert rows(client) == []
     assert _rejected_count() == before
     assert client.post("/webhook/a/b", data={}).status_code == 404
     # The untokened route keeps today's behaviour, including the trailing-slash redirect.

@@ -8,16 +8,27 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app import audit, audit_cli, db
-from conftest import records
+from conftest import migrated, records
 
 
 @pytest.fixture
-def audit_db(tmp_path):
+def legacy_db(tmp_path):
+    """An events table and no audit table, as a release before the audit trail left it."""
     path = tmp_path / "fixture # &.db"
     with sqlite3.connect(path) as conn:
         conn.executescript(db.SCHEMA)
         db.insert_event(conn, "2026-01-01T00:00:00+00:00", "media.play", {}, '"SECRET"')
+    conn.close()
     return path
+
+
+@pytest.fixture
+def audit_db(legacy_db):
+    """The legacy database after service startup migrated it."""
+    with sqlite3.connect(legacy_db) as conn:
+        migrated(conn)
+    conn.close()
+    return legacy_db
 
 
 def receipt(path, **kwargs):
@@ -55,7 +66,7 @@ def test_append_contract_rejects_untrusted_metadata(audit_db, fields):
     with pytest.raises((ValueError, KeyError)):
         receipt(audit_db, **fields)
     with sqlite3.connect(audit_db) as conn:
-        assert conn.execute("SELECT name FROM sqlite_master WHERE name='audit_events'").fetchone() is None
+        assert conn.execute("SELECT COUNT(*) FROM audit_events").fetchone() == (0,)
 
 
 def test_concurrent_owned_writers_and_legacy_receipts(audit_db):
@@ -184,10 +195,10 @@ def _event_retention_fixture(tmp_path):
     recent = (now - timedelta(days=1)).isoformat()
     path = tmp_path / "ret.db"
     with sqlite3.connect(path) as conn:
-        conn.executescript(db.SCHEMA)
+        migrated(conn)
         db.insert_event(conn, old, "media.play", {}, '"old"')
         db.insert_event(conn, recent, "media.play", {}, '"new"')
-    receipt(path)  # creates the audit table, as the running service does
+    receipt(path)
     log = tmp_path / "events.jsonl"
     lines = [json.dumps({"received_at": old}), json.dumps({"received_at": recent}), "not json", json.dumps({"x": 1})]
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -304,7 +315,8 @@ def test_light_detail_accepts_brightness_bounds_and_none(audit_db):
     assert [row["detail"]["targets"][0]["brightness"] for row in records(audit_db)] == [None, 0, 100]
 
 
-def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(audit_db, capsys):
+def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(legacy_db, capsys):
+    audit_db = legacy_db
     legacy_schema = audit.SCHEMA.replace("checksum TEXT NOT NULL,\n    detail TEXT", "checksum TEXT NOT NULL")
     assert legacy_schema != audit.SCHEMA
     # A receipt as a deployed service wrote it before light records: no detail key in the checksum.
@@ -319,6 +331,8 @@ def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(audit_db, ca
         conn.execute(f"INSERT INTO audit_events ({', '.join(audit.RECORD_COLUMNS)}) "
                      f"VALUES ({', '.join('?' * len(audit.RECORD_COLUMNS))})",
                      tuple(old[key] for key in audit.RECORD_COLUMNS))
+        conn.commit()
+        migrated(conn)  # service startup adds the column; append itself runs no DDL
     audit.append(audit_db, action="light.result", outcome="command_sent", reason_code="lan_command_sent",
                  correlation=audit.correlation_id(), target_id="light-1",
                  detail={"action_id": audit.correlation_id(), "request": "dim", "on_behalf_of": "plex_server",
@@ -335,7 +349,8 @@ def test_legacy_audit_table_gains_detail_column_and_keeps_checksums(audit_db, ca
     assert ["detail" in row for row in exported] == [False, True]
 
 
-def test_export_reads_legacy_table_without_detail_column(audit_db, capsys):
+def test_export_reads_legacy_table_without_detail_column(legacy_db, capsys):
+    audit_db = legacy_db
     # A database last written before light records, opened read-only, is never migrated.
     legacy_schema = audit.SCHEMA.replace("checksum TEXT NOT NULL,\n    detail TEXT", "checksum TEXT NOT NULL")
     assert legacy_schema != audit.SCHEMA

@@ -14,7 +14,7 @@ import requests
 from prometheus_client import REGISTRY
 
 from app import audit, audit_cli, dispatcher, lights
-from conftest import drain, payload, post, records, rows
+from conftest import drain, migrated, payload, post, records, rows
 
 REAL_APPLY_ACTION = lights.apply_action
 SENTINEL = "synthetic-secret-sentinel"
@@ -287,8 +287,9 @@ def test_dispatcher_error_summary_and_metric_semantics(client, real_lights, monk
     assert all(r["reason_code"] != "dispatcher_error" for r in summaries[1:])
 
 
-def test_backend_that_returns_nothing_is_unconfirmed(client):
-    post(client, payload("media.play", uuid="uuid-living"))  # conftest recorder returns None
+def test_backend_that_returns_nothing_is_unconfirmed(client, monkeypatch):
+    monkeypatch.setattr(lights, "apply_action", lambda *args, **kwargs: None)  # a backend that reports nothing
+    post(client, payload("media.play", uuid="uuid-living"))
     drain()
     summary = [r for r in rows(client) if r["action"] == "light.action_summary"][0]
     assert (summary["outcome"], summary["reason_code"]) == ("unconfirmed", "no_results")
@@ -297,7 +298,7 @@ def test_backend_that_returns_nothing_is_unconfirmed(client):
 def test_queued_only_row_stays_incomplete_and_is_not_replayed(tmp_path):
     path = tmp_path / "audit.db"
     import sqlite3
-    sqlite3.connect(path).close()
+    migrated(sqlite3.connect(path)).close()
     correlation = audit.correlation_id()
     action_id = audit.correlation_id()
     audit.append(path, action="light.action_queued", outcome="queued", reason_code="accepted",
@@ -312,7 +313,7 @@ def test_queued_only_row_stays_incomplete_and_is_not_replayed(tmp_path):
 def test_audit_rejects_free_text_and_unknown_detail(tmp_path):
     path = tmp_path / "audit.db"
     import sqlite3
-    sqlite3.connect(path).close()
+    migrated(sqlite3.connect(path)).close()
     base = {"action_id": audit.correlation_id(), "request": "dim", "on_behalf_of": "plex_server",
             "brand": "govee", "transport": "lan", "credential_source": "none", "progress": [], "attempts": []}
     call = dict(action="light.result", outcome="command_sent", reason_code="lan_command_sent",
