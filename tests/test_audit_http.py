@@ -88,8 +88,8 @@ def test_audit_failure_does_not_block_or_retry(client, rooms_file, monkeypatch, 
         if endpoint.endswith("reload"):
             assert list(main.registry.rooms) == ["SECRET"]
     assert response.status_code == 200
-    # The webhook also tries its queued, decision and summary records; each failure is counted, none retried.
-    expected = 4 if endpoint == "webhook" else 1
+    # The webhook also tries its queued, decision, per-light result and summary records; each failure is counted, none retried.
+    expected = 5 if endpoint == "webhook" else 1
     assert len(calls) == expected
     assert REGISTRY.get_sample_value(metric) == before + expected
     assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text.split("reason=audit_write_failed")[-1]

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from app import db, lights, main
-from conftest import drain
+from conftest import accepted_result, drain
 
 ROOM = "den"
 CLIENT_UUID = "client-1"
@@ -57,6 +57,7 @@ def test_running_dim_keeps_http_responsive_and_restores_in_order(fake_room, monk
             started.set()
             assert release.wait(timeout=30)
         applied.append(action)
+        return [accepted_result(light) for light in room_lights]
 
     monkeypatch.setattr(lights, "apply_action", held_dim)
     before = {action: completed(action) for action in ("dim", "restore")}

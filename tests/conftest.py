@@ -88,17 +88,33 @@ def registry(rooms_file):
     reg._state = EMPTY_STATE
 
 
+def accepted_result(light):
+    """The result a brand reports when its command goes through: Govee LAN sends, Tuya local is accepted."""
+    from app import lights
+
+    if light.get("brand") == "govee":
+        transport, outcome, reason = "lan", "command_sent", "lan_command_sent"
+    else:
+        transport, outcome, reason = "local", "request_accepted_by_transport", "local_accepted"
+    return lights.LightResult(light.get("brand"), light["id"], transport, "none", outcome, reason)
+
+
 @pytest.fixture
 def light_calls(monkeypatch):
-    """Replace the light backend with a recorder: list of (action, [light ids])."""
+    """Replace the light backend with a recorder: list of (action, [light ids]).
+
+    Like the real apply_action, it returns a LightResult per light: the transport
+    outcome each brand reports when its command goes through.
+    """
     from app import lights
 
     calls = []
-    monkeypatch.setattr(
-        lights,
-        "apply_action",
-        lambda action, room_lights, brightness=None, turn_on=True: calls.append((action, [light["id"] for light in room_lights])),
-    )
+
+    def apply_action(action, room_lights, brightness=None, turn_on=True):
+        calls.append((action, [light["id"] for light in room_lights]))
+        return [accepted_result(light) for light in room_lights]
+
+    monkeypatch.setattr(lights, "apply_action", apply_action)
     # Reads must never reach a controller; "unreadable" makes dim fall back and restore proceed.
     monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())
     monkeypatch.setattr(lights, "prepare", lambda room_lights: None)
