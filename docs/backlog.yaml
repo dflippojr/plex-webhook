@@ -174,3 +174,40 @@ items:
       `docs/audit.md` "Retention maintenance" and the CLI's `--apply` help.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: light-controller-contract
+    kind: deferred
+    status: done
+    issue: 184
+    title: "Light controllers: declare the contract and make the test fakes honor it"
+    body: |
+      From the 2026-11-17 architecture review. The light-controller contract was implicit:
+      each controller was duck-typed, so test doubles drifted from it and production code
+      grew tolerance for them.
+
+      Built in #184 (stage 1): `app/lights.py` declares the `LightController` Protocol, and
+      the `light_calls` fake and the other apply_action fakes return LightResult lists.
+      Stages 2 and 3 are `light-controller-cleanup`.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: light-controller-cleanup
+    kind: deferred
+    title: "Delete the light tolerance code, the test-only functions and the unreachable expiry branch"
+    body: |
+      Stages 2 and 3 of #184. Stage 1 (the `LightController` Protocol and honest fakes) is built.
+
+      - Stage 2: delete the non-list result checks in `app/dispatcher.py` (`_dim`, `_restore`,
+        `_apply`) and `_attempt_of` in `app/lights.py`. Move any test that patches a transport
+        step to return a bool so it returns an `Attempt`.
+      - Stage 3: delete `db.event_counts`, `GoveeController._discover_ip`,
+        `dispatcher._client_id` and `ActionQueue.pending`, and move their tests to the public
+        paths that exercise the same behaviour (`labeled_event_counts`, `prepare` and
+        `_resolve`, `ActionQueue.submit` futures). Simplify `expire_idle_clients` to the
+        one-entry-per-room invariant, which removes the unreachable `if not active:` arc.
+
+      Both stages delete tests, so they need the owner's `gate-change-approved` label. Check
+      the coverage total against `fail_under` in `.coveragerc` first: deleting covered code can
+      lower the percentage, so cover a miss before deleting.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.

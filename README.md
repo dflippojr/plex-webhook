@@ -11,6 +11,7 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#4](https://github.com/dflippojr/plex-webhook/issues/4) verify Tuya/Gosund DPS indices against a real device (blocked on #2)
 - [#189](https://github.com/dflippojr/plex-webhook/issues/189) remove the legacy `events.jsonl` pruning code one release after #183 stopped writing the log
 - prune stored events and audit rows without stopping the service, now that the database runs in WAL mode (backlog `online-retention`, not filed yet)
+- delete the light tolerance code and the test-only functions, after #184 declared the controller contract (backlog `light-controller-cleanup`, not filed yet)
 
 The next planned steps are those three hardware checks; they need the owner's devices
 and accounts.
