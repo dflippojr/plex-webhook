@@ -15,6 +15,10 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
   form. Missing/invalid payloads retain the existing HTTP 200/raw-history
   behavior; a malformed form returns sanitized HTTP 400. A rejected receipt
   never claims that an action happened. Receipt is not dispatch or light success.
+  `denied/invalid_token` means `WEBHOOK_TOKEN` is set and the request carried no
+  token or a wrong one: it got HTTP 404, nothing was stored and nothing was
+  dispatched. Its actor is anonymous, it has no event target, and it shares the
+  denied-row cap below.
 - `rooms.reload`: `activated/loaded` means validated state was published;
   `rejected/invalid_config` or `rejected/config_unavailable` leaves the old
   mapping and playback state unchanged. A successful no-op reload is still an
@@ -29,11 +33,12 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
   empty mapping. Its actor is the system. Reload/validation by a valid admin token
   records actor `admin_token`/`owner-admin`, verified (a shared client
   credential, not a person). Webhook receipts record `plex_server`/`plex-server`,
-  unverified: the webhook is unauthenticated, so a receipt cannot establish that
-  Plex sent it. Denied calls are `outcome=denied` with reason `missing_credential`,
+  unverified: even with `WEBHOOK_TOKEN` set, a receipt shows only that the caller
+  held the URL, not that Plex sent it. Denied calls are `outcome=denied` with reason `missing_credential`,
   `invalid_credential` or `auth_unconfigured`, an anonymous actor, on
-  `rooms.reload`, `rooms.validate`, `rooms.read`, `lights.check` and `clients.read`; at most 20
-  such rows per minute are written (all are counted in a metric). Plex account/client
+  `rooms.reload`, `rooms.validate`, `rooms.read`, `lights.check` and `clients.read`.
+  Together with denied webhook receipts, at most 20 such rows per minute are
+  written (all are counted in a metric). Plex account/client
   identifiers are payload claims and are omitted from this v1 trail.
 
 Each operation gets a server-generated correlation UUID; client headers cannot
