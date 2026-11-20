@@ -287,8 +287,9 @@ def test_dispatcher_error_summary_and_metric_semantics(client, real_lights, monk
     assert all(r["reason_code"] != "dispatcher_error" for r in summaries[1:])
 
 
-def test_backend_that_returns_nothing_is_unconfirmed(client):
-    post(client, payload("media.play", uuid="uuid-living"))  # conftest recorder returns None
+def test_backend_that_returns_nothing_is_unconfirmed(client, monkeypatch):
+    monkeypatch.setattr(lights, "apply_action", lambda *args, **kwargs: None)  # a backend that reports nothing
+    post(client, payload("media.play", uuid="uuid-living"))
     drain()
     summary = [r for r in rows(client) if r["action"] == "light.action_summary"][0]
     assert (summary["outcome"], summary["reason_code"]) == ("unconfirmed", "no_results")

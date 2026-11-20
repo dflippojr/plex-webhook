@@ -40,6 +40,7 @@ import time
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import yaml
 
@@ -737,6 +738,20 @@ class TuyaController:
 # --- dispatch table ---------------------------------------------------------
 
 
+@runtime_checkable
+class LightController(Protocol):
+    """What the dispatcher needs from a brand's controller. Structural: no base class to inherit.
+
+    Neither method raises: ``apply`` returns one LightResult per light and ``read_state`` one StateReading.
+    """
+
+    def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
+        """Act on one light; the result says what was attempted and how far it got."""
+
+    def read_state(self, light: dict, timeout: float) -> StateReading:
+        """The light's current state, or StateReading.failed() when it cannot be read."""
+
+
 class NullController:
     """Fallback for an unknown/misconfigured brand - logs and does nothing."""
 
@@ -751,14 +766,14 @@ class NullController:
         return _fallback_result(_brand_of(light), light, "skipped", "unsupported_brand")
 
 
-_controllers = {
+_controllers: dict[str, LightController] = {
     "govee": GoveeController(),
     "tuya": TuyaController(),
 }
-_null_controller = NullController()
+_null_controller: LightController = NullController()
 
 
-def get_controller(brand: str):
+def get_controller(brand: str) -> LightController:
     return _controllers.get(brand, _null_controller)
 
 

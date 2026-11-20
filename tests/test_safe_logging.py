@@ -120,7 +120,7 @@ def test_unavailable_controller_omits_free_text(monkeypatch, caplog, brand):
 def test_dispatcher_failure_and_later_action(monkeypatch, caplog, failure_stage):
     sentinel = "synthetic-dispatcher-" + failure_stage
     monkeypatch.setattr(dispatcher.registry, "lights_for", lambda room: [])
-    monkeypatch.setattr(lights, "apply_action", lambda *a, **k: None)
+    monkeypatch.setattr(lights, "apply_action", lambda *a, **k: [])  # the room has no lights, so no results
     target, attribute = (dispatcher.registry, "lights_for") if failure_stage == "lookup" else (lights, "apply_action")
     with caplog.at_level(logging.INFO, logger="plex-webhook"), monkeypatch.context() as patch:
         patch.setattr(target, attribute, fail(sentinel))
