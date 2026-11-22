@@ -27,6 +27,9 @@ PLEX_EVENTS = frozenset({
     "device.new", "playback.started",
 })
 
+# How long a graceful stop waits for queued light actions, under Docker's default 10 s stop timeout.
+SHUTDOWN_DRAIN_SECONDS = 5.0
+
 # Denied-request audit rows are capped per window so a flood of bad calls cannot
 # grow the trail unbounded; every denial is still counted in the metric.
 DENIAL_AUDIT_LIMIT, DENIAL_AUDIT_WINDOW = 20, 60.0
@@ -65,6 +68,12 @@ class Service:
         return self
 
     def stop(self):
+        """Stop intake, give queued light actions SHUTDOWN_DRAIN_SECONDS to finish, then close the store.
+
+        Actions still queued after the wait are dropped and audited as ``skipped/shutdown``.
+        """
+        if not self.queue.close(SHUTDOWN_DRAIN_SECONDS):
+            logger.warning("reason=shutdown_drain_timeout seconds=%s", SHUTDOWN_DRAIN_SECONDS)
         if self.conn is not None:
             self.conn.close()
             self.conn = None

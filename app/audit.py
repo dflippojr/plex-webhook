@@ -59,7 +59,7 @@ OPERATIONS = {
     # A read-only light check; per-light values never enter the trail.
     "lights.check": ("http", "anonymous", "room", {
         "completed": {"read"}, "rejected": {"unknown_room"},
-        "failed": {"timed_out", "queue_overflow", "superseded", "check_error"},
+        "failed": {"timed_out", "queue_overflow", "superseded", "shutdown", "check_error"},
         "denied": set(DENIAL_REASONS),
     }),
     "clients.read": ("http", "anonymous", "clients", {"denied": set(DENIAL_REASONS)}),
@@ -81,7 +81,7 @@ OPERATIONS = {
         "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
         "failed": {"all_failed", "dispatcher_error"},
         "skipped": {"all_skipped", "no_lights", "own_playback_active", "owned_by_newer_source", "superseded",
-                    "queue_overflow"},
+                    "queue_overflow", "shutdown"},
     }),
 }
 LIGHT_REQUESTS = {"dim", "restore"}

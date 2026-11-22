@@ -163,6 +163,7 @@ LIGHT_CHECK_FAILURES = {
     "timed_out": (504, "Light check timed out"),
     "queue_overflow": (503, "Light check queue full"),
     "superseded": (503, "Light check superseded"),
+    "shutdown": (503, "Light check stopped by shutdown"),
     "check_error": (500, "Light check failed"),
 }
 
