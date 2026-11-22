@@ -14,7 +14,7 @@ OPERATIONS = {
         "completed_unverified": ["all_sent"], "failed": ["all_failed", "dispatcher_error"],
         "partial": ["mixed_results"],
         "skipped": ["all_skipped", "no_lights", "own_playback_active", "owned_by_newer_source", "queue_overflow",
-                    "superseded"],
+                    "shutdown", "superseded"],
         "unconfirmed": ["all_unconfirmed", "no_results", "some_unconfirmed"],
     }),
     "light.decision": ("dispatcher", "system", "light", {
@@ -28,7 +28,7 @@ OPERATIONS = {
         "unconfirmed": ["result_unconfirmed"],
     }),
     "lights.check": ("http", "anonymous", "room", {
-        "completed": ["read"], "denied": DENIED, "failed": ["check_error", "queue_overflow", "superseded", "timed_out"],
+        "completed": ["read"], "denied": DENIED, "failed": ["check_error", "queue_overflow", "shutdown", "superseded", "timed_out"],
         "rejected": ["unknown_room"],
     }),
     "rooms.read": ("http", "anonymous", "rooms", {"denied": DENIED}),

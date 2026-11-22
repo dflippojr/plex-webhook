@@ -656,9 +656,11 @@ Audit failures warn and increment a counter while webhooks/reloads continue.
 An offline pytest suite covers the webhook receiver, the room dispatcher, the
 SQLite event store and the Govee and Tuya controllers. Devices, `requests` and
 `tinytuya` are replaced by fakes, and any non-loopback network access fails
-the test. No `/data`, `/config` or `.env` is needed: the suite points the
-paths at a temporary directory through the `DB_PATH` and `ROOMS_CONFIG_PATH`
-environment variables (unset, they default to `/data/plex_events.db` and
+the test. No `/data`, `/config` or `.env` is needed: each test builds its own
+service with `create_app(settings)` (or a `Service`) whose `Settings` point at
+its temporary directory. Importing `app.main` opens no file: `create_app()` reads
+`DB_PATH` and `ROOMS_CONFIG_PATH` from the environment, and the service opens them
+when it starts (unset, they default to `/data/plex_events.db` and
 `/config/rooms.yaml`, as in the container).
 
 ```bash

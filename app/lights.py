@@ -59,15 +59,8 @@ TUYA_CLOUD_BRIGHTNESS_CODE = "bright_value_v2"
 TUYA_RAW_MIN, TUYA_RAW_MAX = 10, 1000
 
 
-def _read_timeout() -> float:
-    try:
-        value = float(os.environ.get("LIGHT_READ_TIMEOUT_S", "2"))
-    except ValueError:
-        return 2.0
-    return value if 0 < value <= 30 else 2.0
-
-
-STATE_READ_TIMEOUT_S = _read_timeout()
+# Set from Settings at service startup (configure); the defaults match Settings'.
+STATE_READ_TIMEOUT_S = 2.0
 
 GOVEE_LAN_SCAN_PORT = 4001          # multicast scan request target port
 GOVEE_LAN_SCAN_MULTICAST_ADDR = "239.255.255.250"
@@ -84,12 +77,18 @@ GOVEE_LAN_PRIVATE_NETWORKS = tuple(IPv4Network(cidr) for cidr in (
 GOVEE_CLOUD_API_URL = "https://developer-api.govee.com/v1/devices/control"
 GOVEE_CLOUD_STATE_URL = "https://developer-api.govee.com/v1/devices/state"
 
-SECRETS_PATH = Path(os.environ.get("DEVICES_SECRETS_PATH", "/config/devices.secrets.yaml"))
+SECRETS_PATH = Path("/config/devices.secrets.yaml")
 
 
 # --- secrets loading (cached) --------------------------------------------
 
 _secrets_cache = None
+
+
+def configure(secrets_path: Path, read_timeout_s: float) -> None:
+    """Apply the service's settings; the device secrets are read again on next use."""
+    global SECRETS_PATH, STATE_READ_TIMEOUT_S, _secrets_cache
+    SECRETS_PATH, STATE_READ_TIMEOUT_S, _secrets_cache = Path(secrets_path), read_timeout_s, None
 
 
 SENT_OUTCOMES = ("command_sent", "request_accepted_by_transport", "unconfirmed")

@@ -1,13 +1,12 @@
 import sqlite3
 
-from app import db
+from app import storage
 from app.db import event_counts, insert_event, last_received_at, list_known_clients
 from conftest import payload
 
 
-def test_get_connection_creates_schema(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "sub" / "e.db")
-    conn = db.get_connection()
+def test_startup_connection_creates_schema(tmp_path):
+    conn = storage.open_database(tmp_path / "sub" / "e.db")
     try:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
     finally:

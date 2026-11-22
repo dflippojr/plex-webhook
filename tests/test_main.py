@@ -1,13 +1,10 @@
 import asyncio
-import importlib
+import dataclasses
 import json
-import os
 import sqlite3
 import types
-from pathlib import Path
 
 import pytest
-from prometheus_client import REGISTRY
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from conftest import ROOMS_YAML, drain, payload, post, rows
@@ -105,7 +102,7 @@ def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry,
         assert client.post("/webhook", data=request).status_code == 200
     drain()
     drain()
-    for directory in (tmp_path, Path(os.environ["DB_PATH"]).parent):
+    for directory in (tmp_path, client.service.settings.db_path.parent):
         assert not (directory / "events.jsonl").exists()
     receipts = [r for r in rows(client) if r["action"] == "webhook.receipt"]
     assert [r["reason_code"] for r in receipts] == ["accepted", "invalid_json", "missing_payload", "server_not_allowed"]
@@ -114,32 +111,31 @@ def test_no_event_log_is_written_and_every_receipt_has_its_row(client, registry,
     assert len(stored) == 4
 
 
-def _event_series():
+def _event_series(service):
     return {tuple(sample.labels[name] for name in ("event", "player", "account"))
-            for metric in REGISTRY.collect() if metric.name == "plex_webhook_events"
+            for metric in service.metrics.registry.collect() if metric.name == "plex_webhook_events"
             for sample in metric.samples if sample.name == "plex_webhook_events_total"}
 
 
 def test_webhook_increments_metrics(client):
     labels = {"event": "media.pause", "player": "Living Room TV", "account": "known"}
-    before = REGISTRY.get_sample_value("plex_webhook_events_total", labels) or 0
+    registry = client.service.metrics.registry
+    before = registry.get_sample_value("plex_webhook_events_total", labels) or 0
     post(client, payload("media.pause", title="living room tv "))
-    assert REGISTRY.get_sample_value("plex_webhook_events_total", labels) == before + 1
+    assert registry.get_sample_value("plex_webhook_events_total", labels) == before + 1
     assert b"plex_webhook_events_total" in client.get("/metrics").content
 
 
-def test_event_labels_map_unknown_values_to_other(registry):
-    import app.main as main
-
-    assert main._event_labels("media.play", " BEDROOM apple tv", "unknown", "dan") == (
+def test_event_labels_map_unknown_values_to_other(service):
+    assert service.event_labels("media.play", " BEDROOM apple tv", "unknown", "dan") == (
         "media.play", "Bedroom Apple TV", "known")
-    assert main._event_labels("media.bogus", "Stranger TV", "unknown", "unknown") == ("other", "other", "other")
-    assert main._event_labels("unknown", "unknown", "unknown", "unknown") == ("unknown", "unknown", "other")
+    assert service.event_labels("media.bogus", "Stranger TV", "unknown", "unknown") == ("other", "other", "other")
+    assert service.event_labels("unknown", "unknown", "unknown", "unknown") == ("unknown", "unknown", "other")
     # Resolved like dispatch: uuid first, so a renamed or untitled player keeps its room's label.
-    assert main._event_labels("media.play", "Renamed TV", "uuid-living", "dan")[1] == "Living Room TV"
-    assert main._event_labels("media.play", "unknown", "uuid-bed-tv", "dan")[1] == "Bedroom Apple TV"
-    assert main._event_labels("media.play", "unknown", "uuid-stranger", "dan")[1] == "unknown"
-    labels = {main._event_labels(f"evt.{i}", f"Player {i}", f"uuid-{i}", f"user{i}") for i in range(1000)}
+    assert service.event_labels("media.play", "Renamed TV", "uuid-living", "dan")[1] == "Living Room TV"
+    assert service.event_labels("media.play", "unknown", "uuid-bed-tv", "dan")[1] == "Bedroom Apple TV"
+    assert service.event_labels("media.play", "unknown", "uuid-stranger", "dan")[1] == "unknown"
+    labels = {service.event_labels(f"evt.{i}", f"Player {i}", f"uuid-{i}", f"user{i}") for i in range(1000)}
     assert labels == {("other", "other", "known")}
 
 
@@ -147,51 +143,51 @@ NULL_TITLE = ROOMS_YAML.replace("      - title: Living Room TV\n        uuid: uu
                                 "      - title: null\n        uuid: uuid-living\n")
 
 
-def _total(event, player, account):
-    return REGISTRY.get_sample_value("plex_webhook_events_total",
-                                     {"event": event, "player": player, "account": account}) or 0
+def _total(client, event, player, account):
+    return client.service.metrics.registry.get_sample_value(
+        "plex_webhook_events_total", {"event": event, "player": player, "account": account}) or 0
 
 
 def test_uuid_match_with_new_title_counts_under_its_room(client, light_calls):
-    import app.main as main
+    from app.db import labeled_event_counts
 
-    other, known = _total("media.play", "other", "known"), _total("media.play", "Living Room TV", "known")
+    other, known = _total(client, "media.play", "other", "known"), _total(client, "media.play", "Living Room TV", "known")
     assert post(client, payload("media.play", title="Renamed TV", uuid="uuid-living")).status_code == 200
     drain()
     assert light_calls == [("dim", ["AA:BB"])]
-    assert _total("media.play", "Living Room TV", "known") == known + 1
-    assert _total("media.play", "other", "known") == other
-    reseeded = main.labeled_event_counts(client.conn, main._event_labels)
+    assert _total(client, "media.play", "Living Room TV", "known") == known + 1
+    assert _total(client, "media.play", "other", "known") == other
+    reseeded = labeled_event_counts(client.conn, client.service.event_labels)
     assert reseeded == {("media.play", "Living Room TV", "known"): 1}
 
 
 def test_null_title_client_counts_under_the_room_key(client, rooms_file, light_calls):
-    import app.main as main
+    from app.db import labeled_event_counts
 
     assert NULL_TITLE != ROOMS_YAML
     rooms_file.write_text(NULL_TITLE, encoding="utf-8")
     assert client.post("/rooms/reload").status_code == 200
-    other, room = _total("media.play", "other", "known"), _total("media.play", "living_room", "known")
+    other, room = _total(client, "media.play", "other", "known"), _total(client, "media.play", "living_room", "known")
     assert post(client, payload("media.play", title="Living Room TV", uuid="uuid-living")).status_code == 200
     drain()
     assert light_calls == [("dim", ["AA:BB"])]
-    assert _total("media.play", "living_room", "known") == room + 1
-    assert _total("media.play", "other", "known") == other
-    reseeded = main.labeled_event_counts(client.conn, main._event_labels)
+    assert _total(client, "media.play", "living_room", "known") == room + 1
+    assert _total(client, "media.play", "other", "known") == other
+    reseeded = labeled_event_counts(client.conn, client.service.event_labels)
     assert reseeded == {("media.play", "living_room", "known"): 1}
 
 
 def test_webhook_labels_stay_bounded_for_many_distinct_values(client):
-    import app.main as main
+    from app.service import PLEX_EVENTS
 
     for i in range(40):
         body = payload(f"synthetic.{i}", title=f"Synthetic Player {i}", account=f"synthetic-user-{i}")
         assert post(client, body).status_code == 200
     post(client, payload("media.stop"))
     client.post("/webhook", data={"payload": "{not json"})
-    series = _event_series()
+    series = _event_series(client.service)
     assert not any("synthetic" in value.lower() for labels in series for value in labels)
-    event_values = main.PLEX_EVENTS | {"other", "unknown"}
+    event_values = PLEX_EVENTS | {"other", "unknown"}
     assert {labels[0] for labels in series} <= event_values
     # Room keys appear when a test configures a client without a title.
     rooms = {"Living Room TV", "Bedroom Apple TV", "living_room", "bedroom"}
@@ -224,26 +220,26 @@ def test_rooms_and_reload(client, rooms_file):
     assert list(client.get("/rooms").json()["rooms"]) == ["den"]
 
 
-def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, monkeypatch, light_calls):
-    from app import dispatcher
-
+def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, monkeypatch, light_calls, playback):
     post(client, payload("media.play", uuid="uuid-living"))
     drain()
-    before = registry._state
-    active = {key: dict(value) for key, value in dispatcher._active_clients.items()}
-    metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
+    # Rooms, indexes, automations and options are published as one reference, so an unchanged
+    # rooms mapping means nothing was published.
+    before = registry.rooms
+    active = {key: dict(value) for key, value in playback.active_clients.items()}
+    metrics = list(playback.metrics.room_active_sessions.collect())[0].samples
     calls = list(light_calls)
     def unexpected():
         pytest.fail("validation must not initialize gauges")
-    original_init = dispatcher.init_room_gauges
-    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    original_init = playback.init_room_gauges
+    monkeypatch.setattr(playback, "init_room_gauges", unexpected)
     rooms_file.write_text("rooms: {den: {plex_clients: [{title: x}]}}", encoding="utf-8")
     assert client.post("/rooms/validate").json() == {"status": "valid", "rooms": ["den"]}
-    assert registry._state is before
-    assert dispatcher._active_clients == active
-    assert list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples == metrics
+    assert registry.rooms is before
+    assert playback.active_clients == active
+    assert list(playback.metrics.room_active_sessions.collect())[0].samples == metrics
     assert light_calls == calls
-    monkeypatch.setattr(dispatcher, "init_room_gauges", original_init)
+    monkeypatch.setattr(playback, "init_room_gauges", original_init)
     assert client.post("/rooms/reload").json() == {"status": "reloaded", "rooms": ["den"]}
 
 
@@ -254,26 +250,24 @@ def test_validate_does_not_publish_or_dispatch(client, registry, rooms_file, mon
     "rooms: {a: {plex_clients: [{uuid: private-value}]}, b: {plex_clients: [{uuid: private-value}]}}",
     "rooms: {a: {plex_clients: [{title: Private-Value}]}, b: {plex_clients: [{title: ' private-value '}]}}",
 ])
-def test_invalid_room_endpoints_preserve_dispatch(client, registry, rooms_file, light_calls, monkeypatch, endpoint, source):
-    from app import dispatcher
-
+def test_invalid_room_endpoints_preserve_dispatch(client, registry, rooms_file, light_calls, monkeypatch, endpoint, source, playback):
     post(client, payload("media.play", uuid="uuid-living"))
     drain()
-    before = registry._state
-    active = {key: dict(value) for key, value in dispatcher._active_clients.items()}
-    metrics = list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples
+    before = registry.rooms
+    active = {key: dict(value) for key, value in playback.active_clients.items()}
+    metrics = list(playback.metrics.room_active_sessions.collect())[0].samples
     calls = list(light_calls)
     def unexpected():
         pytest.fail("failed candidates must not initialize gauges")
-    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    monkeypatch.setattr(playback, "init_room_gauges", unexpected)
     rooms_file.write_text(source, encoding="utf-8")
     resp = client.post(f"/rooms/{endpoint}")
     assert resp.status_code == 422
     assert all(set(error) == {"path", "code"} for error in resp.json()["detail"])
     assert "private-value" not in resp.text.lower()
-    assert registry._state is before
-    assert dispatcher._active_clients == active
-    assert list(dispatcher.ROOM_ACTIVE_SESSIONS.collect())[0].samples == metrics
+    assert registry.rooms is before
+    assert playback.active_clients == active
+    assert list(playback.metrics.room_active_sessions.collect())[0].samples == metrics
     assert light_calls == calls
     post(client, payload("media.stop", uuid="uuid-living"))
     drain()
@@ -282,41 +276,42 @@ def test_invalid_room_endpoints_preserve_dispatch(client, registry, rooms_file, 
 
 @pytest.mark.parametrize("endpoint", ["validate", "reload"])
 @pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
-def test_unavailable_room_endpoints(client, registry, monkeypatch, endpoint, failure):
+def test_unavailable_room_endpoints(client, registry, playback, monkeypatch, endpoint, failure):
     from pathlib import Path
-    from app import dispatcher
 
-    before = registry._state
+    before = registry.rooms
     def fail(*args, **kwargs):
         raise failure("private-value")
     def unexpected():
         pytest.fail("unavailable config must not initialize gauges")
     monkeypatch.setattr(Path, "read_text", fail)
-    monkeypatch.setattr(dispatcher, "init_room_gauges", unexpected)
+    monkeypatch.setattr(playback, "init_room_gauges", unexpected)
     resp = client.post(f"/rooms/{endpoint}")
     assert resp.status_code == 503
     assert resp.json() == {"detail": "Rooms configuration unavailable"}
-    assert registry._state is before
+    assert registry.rooms is before
 
 
-def test_invalid_startup_still_captures_webhook(client, rooms_file, monkeypatch, light_calls):
-    from app import dispatcher
-    import app.main as main
-    from app.rooms import RoomRegistry
-
+@pytest.fixture
+def invalid_startup_rooms(rooms_file):
+    """Requested before ``client``, so the app starts with this invalid rooms file."""
     rooms_file.write_text("rooms: [private-value", encoding="utf-8")
-    startup = RoomRegistry(rooms_file)
-    monkeypatch.setattr(main, "registry", startup)
-    monkeypatch.setattr(dispatcher, "registry", startup)
+    return rooms_file
+
+
+def test_invalid_startup_still_captures_webhook(invalid_startup_rooms, client, light_calls):
+    """A rooms file that is invalid when the app starts leaves empty mappings; capture still works."""
+    service = client.service
+    assert service.registry.rooms == {}
+    assert (service.registry.load_outcome, service.registry.load_reason) == ("rejected", "invalid_config")
     assert post(client, payload("media.play")).status_code == 200
     assert client.conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
-    drain()
+    drain(service)
     assert light_calls == []
 
 
-def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypatch, registry):
+def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, settings, make_service):
     import app.db
-    import app.main as main
 
     db_path = tmp_path / "seed.db"
     conn = sqlite3.connect(db_path)
@@ -335,27 +330,18 @@ def test_counters_and_timestamp_seeded_from_sqlite_on_startup(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    # Re-import the app module against the seeded database, dropping the old collectors first.
-    for collector in (main.EVENTS_TOTAL, main.LAST_EVENT_TIMESTAMP):
-        REGISTRY.unregister(collector)
-    monkeypatch.setattr(app.db, "DB_PATH", db_path)
-    try:
-        reloaded = importlib.reload(main)
-        labels = {"player": "Living Room TV", "account": "known"}
-        assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.play", **labels}) == 3
-        assert REGISTRY.get_sample_value("plex_webhook_events_total", {"event": "media.stop", **labels}) == 1
-        other_player = {"event": "media.play", "player": "other", "account": "known"}
-        assert REGISTRY.get_sample_value("plex_webhook_events_total", other_player) == 1
-        other_all = {"event": "other", "player": "other", "account": "known"}
-        assert REGISTRY.get_sample_value("plex_webhook_events_total", other_all) == 5000
-        assert len(_event_series()) == 4
-        assert REGISTRY.get_sample_value("plex_webhook_last_event_timestamp_seconds") == 1714564800.0
-        reloaded.db_conn.close()
-    finally:
-        for collector in (main.EVENTS_TOTAL, main.LAST_EVENT_TIMESTAMP):
-            REGISTRY.unregister(collector)
-        monkeypatch.undo()
-        importlib.reload(main).db_conn.close()
+    # A service started on the seeded database: its fresh collectors are seeded from the stored history.
+    service = make_service(dataclasses.replace(settings, db_path=db_path))
+    registry = service.metrics.registry
+    labels = {"player": "Living Room TV", "account": "known"}
+    assert registry.get_sample_value("plex_webhook_events_total", {"event": "media.play", **labels}) == 3
+    assert registry.get_sample_value("plex_webhook_events_total", {"event": "media.stop", **labels}) == 1
+    other_player = {"event": "media.play", "player": "other", "account": "known"}
+    assert registry.get_sample_value("plex_webhook_events_total", other_player) == 1
+    other_all = {"event": "other", "player": "other", "account": "known"}
+    assert registry.get_sample_value("plex_webhook_events_total", other_all) == 5000
+    assert len(_event_series(service)) == 4
+    assert registry.get_sample_value("plex_webhook_last_event_timestamp_seconds") == 1714564800.0
 
 
 def _stored(client):
@@ -363,24 +349,24 @@ def _stored(client):
             client.log.exists())
 
 
-def _rejected(reason):
-    return REGISTRY.get_sample_value("plex_webhook_rejected_requests_total", {"reason": reason}) or 0
+def _rejected(client, reason):
+    return client.service.metrics.registry.get_sample_value(
+        "plex_webhook_rejected_requests_total", {"reason": reason}) or 0
 
 
 def test_oversized_content_length_is_413_and_stores_nothing(client, light_calls):
-    before = _rejected("body_too_large")
+    before = _rejected(client, "body_too_large")
     resp = client.post("/webhook", data={"payload": "x" * (3 * 1024 * 1024)})
     assert resp.status_code == 413
     assert _stored(client) == (0, False)
-    assert _rejected("body_too_large") == before + 1
+    assert _rejected(client, "body_too_large") == before + 1
     drain()
     assert light_calls == []
 
 
-def test_body_limiter_passes_non_request_messages(monkeypatch):
+def test_body_limiter_passes_non_request_messages():
     import app.main as main
 
-    monkeypatch.setattr(main, "MAX_BODY_BYTES", 10)
     # The disconnect carries a body only so that counting it would trip the cap.
     disconnect = {"type": "http.disconnect", "body": b"x" * 100}
     messages = [{"type": "http.request", "body": b"x" * 6}, disconnect,
@@ -391,7 +377,7 @@ def test_body_limiter_passes_non_request_messages(monkeypatch):
         return next(source)
 
     request = types.SimpleNamespace(_receive=receive)
-    main._limit_streamed_body(request)
+    main._limit_streamed_body(request, 10)
 
     async def read():
         return [await request._receive() for _ in range(3)]
@@ -402,9 +388,8 @@ def test_body_limiter_passes_non_request_messages(monkeypatch):
 
 
 def test_streamed_body_over_cap_without_content_length_is_413(client, monkeypatch):
-    import app.main as main
-
-    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1024)
+    service = client.service
+    monkeypatch.setattr(service, "settings", dataclasses.replace(service.settings, webhook_max_body_bytes=1024))
 
     def chunks():
         yield b"payload=" + b"x" * 600
@@ -417,30 +402,30 @@ def test_streamed_body_over_cap_without_content_length_is_413(client, monkeypatc
 
 
 def test_too_many_fields_is_413_and_stores_nothing(client):
-    before = _rejected("too_many_fields")
+    before = _rejected(client, "too_many_fields")
     data = {"payload": json.dumps(payload("media.play"))}
     data.update({f"extra{i}": "v" for i in range(20)})
     resp = client.post("/webhook", data=data, files={"thumb": ("t.jpg", b"x", "image/jpeg")})
     assert resp.status_code == 413
     assert _stored(client) == (0, False)
-    assert _rejected("too_many_fields") == before + 1
+    assert _rejected(client, "too_many_fields") == before + 1
 
 
 def test_too_many_files_is_413_and_stores_nothing(client):
-    before = _rejected("too_many_files")
+    before = _rejected(client, "too_many_files")
     files = [(f"f{i}", (f"t{i}.jpg", b"x", "image/jpeg")) for i in range(5)]
     resp = client.post("/webhook", data={"payload": json.dumps(payload("media.play"))}, files=files)
     assert resp.status_code == 413
     assert _stored(client) == (0, False)
-    assert _rejected("too_many_files") == before + 1
+    assert _rejected(client, "too_many_files") == before + 1
 
 
 def test_oversized_field_is_413_and_stores_nothing(client):
-    before = _rejected("field_too_large")
+    before = _rejected(client, "field_too_large")
     resp = client.post("/webhook", data={"payload": "x" * (600 * 1024)}, files={"t": ("t.jpg", b"x", "image/jpeg")})
     assert resp.status_code == 413
     assert _stored(client) == (0, False)
-    assert _rejected("field_too_large") == before + 1
+    assert _rejected(client, "field_too_large") == before + 1
 
 
 def test_malformed_content_length_is_400(client):
@@ -451,9 +436,8 @@ def test_malformed_content_length_is_400(client):
 
 
 def test_large_stored_payload_is_truncated_but_still_dispatched(client, light_calls, monkeypatch):
-    import app.main as main
-
-    monkeypatch.setattr(main, "RAW_PAYLOAD_MAX_BYTES", 300)
+    service = client.service
+    monkeypatch.setattr(service, "settings", dataclasses.replace(service.settings, raw_payload_max_bytes=300))
     body = payload("media.play")
     body["Metadata"]["summary"] = "é" * 2000
     assert post(client, body).status_code == 200
@@ -471,8 +455,8 @@ def test_normal_payload_is_not_marked_truncated(client):
     assert json.loads(client.conn.execute("SELECT raw_payload FROM events").fetchone()[0]) == payload("media.play")
 
 
-def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
-    import app.db as appdb
+def test_existing_database_gains_truncation_column(tmp_path):
+    from app import storage
 
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as conn:
@@ -480,14 +464,16 @@ def test_existing_database_gains_truncation_column(tmp_path, monkeypatch):
                      "account_title TEXT, player_title TEXT, player_uuid TEXT, media_type TEXT, title TEXT, "
                      "grandparent_title TEXT, rating_key TEXT, raw_payload TEXT NOT NULL)")
         conn.execute("INSERT INTO events (received_at, raw_payload) VALUES ('t', '{}')")
-    monkeypatch.setattr(appdb, "DB_PATH", path)
-    conn = appdb.get_connection()
-    assert conn.execute("SELECT raw_truncated FROM events").fetchall() == [(0,)]
-    conn.close()
+    conn = storage.open_database(path)  # what service startup runs on the file
+    try:
+        assert conn.execute("SELECT raw_truncated FROM events").fetchall() == [(0,)]
+    finally:
+        conn.close()
 
 
-def test_existing_database_gains_attachments_column(tmp_path, monkeypatch):
+def test_existing_database_gains_attachments_column(tmp_path):
     import app.db as appdb
+    from app import storage
 
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as conn:
@@ -496,8 +482,7 @@ def test_existing_database_gains_attachments_column(tmp_path, monkeypatch):
                      "grandparent_title TEXT, rating_key TEXT, raw_payload TEXT NOT NULL, "
                      "raw_truncated INTEGER NOT NULL DEFAULT 0)")
         conn.execute("INSERT INTO events (received_at, raw_payload) VALUES ('t', '{}')")
-    monkeypatch.setattr(appdb, "DB_PATH", path)
-    conn = appdb.get_connection()
+    conn = storage.open_database(path)  # what service startup runs on the file
     try:
         # A row stored before the column existed has unknown attachments, not "none".
         assert conn.execute("SELECT attachments FROM events").fetchall() == [(None,)]
@@ -508,11 +493,11 @@ def test_existing_database_gains_attachments_column(tmp_path, monkeypatch):
 
 
 def test_urlencoded_oversized_field_is_413_and_stores_nothing(client):
-    before = _rejected("field_too_large")
+    before = _rejected(client, "field_too_large")
     resp = client.post("/webhook", data={"payload": "x" * (600 * 1024)})
     assert resp.status_code == 413
     assert _stored(client) == (0, False)
-    assert _rejected("field_too_large") == before + 1
+    assert _rejected(client, "field_too_large") == before + 1
 
 
 def _hostile_post(client, raw):
@@ -543,14 +528,14 @@ def test_signed_64_bit_extremes_are_still_stored(client):
     assert post(client, body).status_code == 200
     assert client.conn.execute("SELECT rating_key, title FROM events").fetchone() == (str(2 ** 63 - 1), str(-(2 ** 63)))
 
-def _webhook_metrics():
+def _webhook_metrics(client):
     return {(sample.name, tuple(sorted(sample.labels.items()))): sample.value
-            for metric in REGISTRY.collect() for sample in metric.samples
+            for metric in client.service.metrics.registry.collect() for sample in metric.samples
             if sample.name.startswith("plex_webhook_") and not sample.name.endswith("_created")}
 
 
 def _assert_invalid_form(client, send):
-    before = _webhook_metrics()
+    before = _webhook_metrics(client)
     resp = send()
     assert resp.status_code == 400
     assert resp.json() == {"detail": "Invalid webhook form"}
@@ -559,7 +544,7 @@ def _assert_invalid_form(client, send):
     assert [(r["source"], r["action"], r["outcome"], r["reason_code"], r["changed_fields"]) for r in rows(client)] == [
         ("webhook", "webhook.receipt", "rejected", "invalid_form", {})
     ]
-    assert _webhook_metrics() == before
+    assert _webhook_metrics(client) == before
 
 
 @pytest.mark.parametrize("declared", ["abc", "-1", "1.5", "1e3"])
@@ -611,7 +596,7 @@ UNSTORABLE_FIELDS = [
 def test_unstorable_value_in_each_stored_field_is_invalid_payload(client, light_calls, group, name, value):
     body = payload("media.play")
     body[group][name] = value
-    before = _webhook_metrics()
+    before = _webhook_metrics(client)
     resp = client.post("/webhook", files={"payload": (None, json.dumps(body))})
     assert (resp.status_code, resp.json()) == (200, {"status": "received", "event": None})
     receipt = rows(client)
@@ -622,7 +607,7 @@ def test_unstorable_value_in_each_stored_field_is_invalid_payload(client, light_
         (None, None, None, None, None, None, None, None, json.dumps(body), 0)
     ]
     assert client.conn.execute("SELECT attachments FROM events").fetchall() == [("[]",)]
-    after = _webhook_metrics()
+    after = _webhook_metrics(client)
     events = ("plex_webhook_events_total", (("account", "other"), ("event", "unknown"), ("player", "unknown")))
     assert after.pop(events) == before.pop(events, 0) + 1
     after.pop(("plex_webhook_last_event_timestamp_seconds", ()))

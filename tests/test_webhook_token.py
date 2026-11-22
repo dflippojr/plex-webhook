@@ -2,6 +2,7 @@
 
 The token never appears in logs, audit rows, metrics or responses.
 """
+import dataclasses
 import json
 import logging
 import os
@@ -14,12 +15,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from prometheus_client import generate_latest
-
 from conftest import WEBHOOK_TOKEN, drain, payload, rows
 
 import app.main as main
-from app import auth
+from app import auth, service as service_module
+from app.settings import Settings
 
 ROOT = Path(__file__).resolve().parent.parent
 WRONG = "synthetic-wrong-token-0123456789abcdefgh"
@@ -32,8 +32,8 @@ def _service_log(caplog):
     return "\n".join(r.getMessage() for r in caplog.records if not r.name.startswith(CLIENT_LOGGERS))
 
 
-def _rejected_count():
-    return main.WEBHOOK_REJECTED_TOTAL.labels(reason="invalid_token")._value.get()
+def _rejected_count(client):
+    return client.service.metrics.webhook_rejected.labels(reason="invalid_token")._value.get()
 
 
 def _raw_post(client, url, body):
@@ -60,7 +60,7 @@ def _stored_events(client):
 ], ids=["missing", "wrong", "prefix", "suffix", "query", "empty", "slash", "wrong-slash", "extra", "nested"])
 def test_missing_or_wrong_token_is_404_and_stores_nothing(client, light_calls, caplog, url):
     caplog.set_level(logging.DEBUG)
-    before = _rejected_count()
+    before = _rejected_count(client)
     response = _raw_post(client, url, payload("media.play"))
     drain()
     assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
@@ -72,7 +72,7 @@ def test_missing_or_wrong_token_is_404_and_stores_nothing(client, light_calls, c
     assert (record["outcome"], record["reason_code"]) == ("denied", "invalid_token")
     assert (record["actor_kind"], record["actor_id"], record["actor_verified"]) == ("anonymous", None, 0)
     assert record["target_kind"] == "webhook" and record["target_id"] is None
-    assert _rejected_count() == before + 1
+    assert _rejected_count(client) == before + 1
     assert "reason=webhook_rejected code=invalid_token" in caplog.text
     _assert_secrets_absent(client, response.text, _service_log(caplog))
 
@@ -80,14 +80,14 @@ def test_missing_or_wrong_token_is_404_and_stores_nothing(client, light_calls, c
 @TOKENED
 def test_right_token_is_accepted_and_dispatched(client, light_calls, caplog):
     caplog.set_level(logging.DEBUG)
-    before = _rejected_count()
+    before = _rejected_count(client)
     response = client.post(f"/webhook/{WEBHOOK_TOKEN}", data={"payload": json.dumps(payload("media.play"))})
     drain()
     assert response.status_code == 200 and response.json() == {"status": "received", "event": "media.play"}
     assert _stored_events(client) == 1 and light_calls == [("dim", ["AA:BB"])]
     receipt = [r for r in rows(client) if r["action"] == "webhook.receipt"][0]
     assert (receipt["outcome"], receipt["reason_code"], receipt["actor_id"]) == ("received", "accepted", "plex-server")
-    assert _rejected_count() == before
+    assert _rejected_count(client) == before
     _assert_secrets_absent(client, response.text, _service_log(caplog))
 
 
@@ -107,24 +107,24 @@ def test_errors_after_the_token_check_do_not_echo_it(client, caplog):
 
 @TOKENED
 def test_denials_share_the_capped_audit(client, monkeypatch):
-    monkeypatch.setattr(main, "DENIAL_AUDIT_LIMIT", 2)
-    before = _rejected_count()
+    monkeypatch.setattr(service_module, "DENIAL_AUDIT_LIMIT", 2)
+    before = _rejected_count(client)
     for _ in range(4):
         assert _raw_post(client, "/webhook", payload("media.play")).status_code == 404
     denied = [r for r in rows(client) if r["outcome"] == "denied"]
-    assert len(denied) == 2 and _rejected_count() == before + 4
+    assert len(denied) == 2 and _rejected_count(client) == before + 4
 
 
 def test_without_a_token_the_tokened_route_does_not_exist(client, light_calls):
-    assert main.WEBHOOK_TOKEN_DIGEST is None
-    before = _rejected_count()
+    assert client.service.settings.webhook_token_digest is None
+    before = _rejected_count(client)
     response = client.post(f"/webhook/{WEBHOOK_TOKEN}", data={"payload": json.dumps(payload("media.play"))})
     drain()
     assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
     assert _stored_events(client) == 0 and light_calls == []
     # No audit row was written. The table exists (storage migrations create it at startup), so check its rows.
     assert rows(client) == []
-    assert _rejected_count() == before
+    assert _rejected_count(client) == before
     assert client.post("/webhook/a/b", data={}).status_code == 404
     # The untokened route keeps today's behaviour, including the trailing-slash redirect.
     redirect = client.post("/webhook/?x=1", data={}, follow_redirects=False)
@@ -132,23 +132,23 @@ def test_without_a_token_the_tokened_route_does_not_exist(client, light_calls):
     assert client.post("/webhook", data={"payload": json.dumps(payload("media.play"))}).status_code == 200
 
 
-def test_unset_token_logs_a_startup_warning(monkeypatch, caplog):
+def test_unset_token_logs_a_startup_warning(settings, make_service, caplog):
     caplog.set_level(logging.WARNING)
-    for value in (None, ""):
-        if value is None:
-            monkeypatch.delenv("WEBHOOK_TOKEN", raising=False)
-        else:
-            monkeypatch.setenv("WEBHOOK_TOKEN", value)
+    for environ in ({}, {"WEBHOOK_TOKEN": ""}):
+        digest = Settings.from_env(environ).webhook_token_digest
+        assert digest is None
         caplog.clear()
-        assert main._webhook_token_digest() is None
+        make_service(dataclasses.replace(settings, webhook_token_digest=digest))
         assert "reason=webhook_token_unset" in caplog.text and "set WEBHOOK_TOKEN" in caplog.text
 
 
-def test_valid_token_is_kept_only_as_a_digest(monkeypatch, caplog):
+def test_valid_token_is_kept_only_as_a_digest(settings, make_service, caplog):
     caplog.set_level(logging.DEBUG)
-    monkeypatch.setenv("WEBHOOK_TOKEN", WEBHOOK_TOKEN)
-    digest = main._webhook_token_digest()
+    digest = Settings.from_env({"WEBHOOK_TOKEN": WEBHOOK_TOKEN}).webhook_token_digest
     assert isinstance(digest, bytes) and WEBHOOK_TOKEN.encode() not in digest and caplog.text == ""
+    caplog.set_level(logging.WARNING)
+    make_service(dataclasses.replace(settings, webhook_token_digest=digest))
+    assert "reason=webhook_token_unset" not in caplog.text and WEBHOOK_TOKEN not in caplog.text
     assert auth.webhook_token_matches(WEBHOOK_TOKEN, digest)
     assert not auth.webhook_token_matches(WRONG, digest) and not auth.webhook_token_matches("", digest)
 
@@ -164,13 +164,14 @@ def test_valid_token_is_kept_only_as_a_digest(monkeypatch, caplog):
 def test_unusable_token_is_refused(monkeypatch, value):
     monkeypatch.setenv("WEBHOOK_TOKEN", value)
     with pytest.raises(auth.WebhookTokenError) as raised:
-        main._webhook_token_digest()
+        main.create_app()  # the settings read from the environment refuse it, so no app is built
     assert value not in str(raised.value) and "at least 32 characters" in str(raised.value)
 
 
 def test_minimum_length_token_is_accepted(monkeypatch):
     monkeypatch.setenv("WEBHOOK_TOKEN", "a-Z_0.9~" * 4)
-    assert auth.webhook_token_digest() is not None
+    assert auth.webhook_token_digest("a-Z_0.9~" * 4) is not None
+    assert main.create_app().state.settings.webhook_token_digest is not None
 
 
 def test_short_token_stops_the_server_at_startup(tmp_path):
@@ -193,8 +194,10 @@ def test_access_log_never_shows_the_token(client, caplog):
     import uvicorn
 
     caplog.set_level(logging.INFO)
-    server = uvicorn.Server(uvicorn.Config(main.app, host="127.0.0.1", port=0, log_config=None,
-                                           access_log=True, lifespan="off"))
+    # A second app on the client's settings; uvicorn runs its lifespan, so its service lives on uvicorn's thread.
+    served = main.create_app(client.service.settings)
+    server = uvicorn.Server(uvicorn.Config(served, host="127.0.0.1", port=0, log_config=None,
+                                           access_log=True, lifespan="on"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
@@ -215,6 +218,7 @@ def test_access_log_never_shows_the_token(client, caplog):
     assert ['"POST /webhook/[redacted] HTTP/1.1" 200', '"POST /webhook/[redacted] HTTP/1.1" 404',
             '"POST /webhook?[redacted] HTTP/1.1" 404'] == [line.split(" - ", 1)[1] for line in access]
     _assert_secrets_absent(client, "", caplog.text)
+    assert WEBHOOK_TOKEN not in served.state.service.metrics.render().decode()
 
 
 def _raw_http_post(port, path):
@@ -247,7 +251,7 @@ def _assert_secrets_absent(client, response_text, log_text):
     """Neither the configured token nor a presented wrong one reaches responses, logs, audit rows or metrics."""
     trail = json.dumps(rows(client))
     events = json.dumps(client.conn.execute("SELECT * FROM events").fetchall())
-    metrics = generate_latest().decode()
+    metrics = client.service.metrics.render().decode()
     for secret in (WEBHOOK_TOKEN, WEBHOOK_TOKEN[:-1], WRONG):
         for where, text in (("response", response_text), ("log", log_text), ("audit", trail),
                             ("events", events), ("metrics", metrics)):

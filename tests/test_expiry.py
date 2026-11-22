@@ -2,11 +2,9 @@
 import json
 
 import pytest
-from prometheus_client import REGISTRY
-
-from app import audit, dispatcher
+from app import dispatcher
 from app.rooms import RoomConfigError
-from conftest import ROOMS_YAML, drain, payload, post, rows
+from conftest import active_service, ROOMS_YAML, drain, payload, post, rows
 
 HOUR = 60 * 60
 
@@ -23,21 +21,25 @@ class FakeClock:
 
 
 @pytest.fixture
-def clock(monkeypatch):
+def clock(playback):
     fake = FakeClock()
-    monkeypatch.setattr(dispatcher, "_clock", fake)
+    playback.clock = fake
     return fake
+
+
+def sample_value(name, labels=None):
+    return active_service().metrics.registry.get_sample_value(name, labels)
 
 
 def send(event, metadata=None, **player):
     body = payload(event, **player)
     body["Metadata"].update(metadata or {})
-    dispatcher.handle_event(body)
+    active_service().playback.handle_event(body)
     drain()
 
 
 def expire():
-    dispatcher.expire_idle_clients()
+    active_service().playback.expire_idle_clients()
     drain()
 
 
@@ -45,7 +47,7 @@ def actions(light_calls):
     return [action for action, _ in light_calls]
 
 
-def test_play_with_no_stop_restores_after_default_idle_period(registry, light_calls, clock):
+def test_play_with_no_stop_restores_after_default_idle_period(registry, light_calls, clock, playback):
     send("media.play")
     clock.advance(6 * HOUR - 1)
     expire()
@@ -53,7 +55,7 @@ def test_play_with_no_stop_restores_after_default_idle_period(registry, light_ca
     clock.advance(1)
     expire()
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert dispatcher._active_clients["living_room"] == {}
+    assert playback.active_clients["living_room"] == {}
     expire()
     assert actions(light_calls) == ["dim", "restore"]  # an expired room is restored once
 
@@ -69,15 +71,15 @@ def test_media_duration_sets_expiry_a_few_minutes_past_the_remaining_runtime(reg
 
 
 @pytest.mark.parametrize("duration", [0, -5, True, "7200000", float("inf"), float("nan"), None])
-def test_unusable_duration_falls_back_to_idle_period(registry, light_calls, clock, duration):
+def test_unusable_duration_falls_back_to_idle_period(registry, light_calls, clock, duration, playback):
     send("media.play", {"duration": duration})
-    assert dispatcher._active_clients["living_room"]["Living Room TV"] == clock.now + 6 * HOUR
+    assert playback.active_clients["living_room"]["Living Room TV"] == clock.now + 6 * HOUR
 
 
-def test_implausible_duration_is_capped(registry, light_calls, clock):
+def test_implausible_duration_is_capped(registry, light_calls, clock, playback):
     send("media.play", {"duration": 10 ** 15})
     expected = clock.now + dispatcher.MAX_DURATION_SECONDS + dispatcher.DURATION_GRACE_SECONDS
-    assert dispatcher._active_clients["living_room"]["Living Room TV"] == expected
+    assert playback.active_clients["living_room"]["Living Room TV"] == expected
 
 
 def test_configured_idle_period(registry, rooms_file, light_calls, clock):
@@ -133,12 +135,12 @@ def test_expiry_only_restores_the_stale_room(registry, light_calls, clock):
 
 def test_expiry_updates_metrics(registry, light_calls, clock):
     labels = {"room": "living_room"}
-    before = REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) or 0
+    before = sample_value("plex_dispatcher_expired_players_total", labels) or 0
     send("media.play")
     clock.advance(6 * HOUR)
     expire()
-    assert REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) == before + 1
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_expired_players_total", labels) == before + 1
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
 def test_stop_by_uuid_restores_after_title_only_play(registry, light_calls, clock):
@@ -147,7 +149,7 @@ def test_stop_by_uuid_restores_after_title_only_play(registry, light_calls, cloc
     send("media.play", uuid="uuid-living")
     send("media.stop", uuid="uuid-living")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
     clock.advance(6 * HOUR)
     expire()
     assert actions(light_calls) == ["dim", "restore"]  # restored exactly once
@@ -158,26 +160,26 @@ def test_stop_by_title_restores_after_uuid_play(registry, light_calls, clock):
     send("media.play", title="whatever", uuid="uuid-living")
     send("media.stop", title="living room tv")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
 @pytest.mark.parametrize("event", ["media.stop", "media.pause"])
-def test_title_matched_plays_with_unlisted_uuids_keep_one_entry(registry, light_calls, clock, event):
+def test_title_matched_plays_with_unlisted_uuids_keep_one_entry(registry, light_calls, clock, event, playback):
     labels = {"room": "living_room"}
     for n in range(3):
         send("media.play", uuid=f"synthetic-forged-{n}")
-    assert list(dispatcher._active_clients["living_room"]) == ["Living Room TV"]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 1
+    assert list(playback.active_clients["living_room"]) == ["Living Room TV"]
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 1
     send(event, uuid="uuid-living")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
 @pytest.mark.parametrize("event", ["media.stop", "media.pause"])
-def test_title_matched_player_can_end_its_own_playback(registry, light_calls, event):
-    dispatcher.handle_event(payload("media.play", uuid="synthetic-reinstalled-player"))
+def test_title_matched_player_can_end_its_own_playback(registry, light_calls, event, playback):
+    playback.handle_event(payload("media.play", uuid="synthetic-reinstalled-player"))
     drain()
-    dispatcher.handle_event(payload(event, uuid="synthetic-reinstalled-player"))
+    playback.handle_event(payload(event, uuid="synthetic-reinstalled-player"))
     drain()
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
 
@@ -189,10 +191,10 @@ def test_only_the_latest_unlisted_uuid_ends_a_title_matched_play(registry, light
     send("media.play", uuid=None)  # by title alone, so maybe the same player
     send("media.stop", uuid="synthetic-forged-0")
     assert light_calls == [("dim", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 1
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 1
     send("media.stop", uuid="synthetic-forged-1")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
     send("media.stop", uuid="synthetic-forged-1")  # its playback ended, so it has nothing left to end
     assert actions(light_calls) == ["dim", "restore"]
 
@@ -203,10 +205,10 @@ def test_a_play_by_the_listed_uuid_takes_the_room_from_an_unlisted_one(registry,
     send("media.play", uuid="uuid-living")
     send("media.stop", uuid="synthetic-forged-2")
     assert light_calls == [("dim", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 1
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 1
     send("media.stop", uuid="uuid-living")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
 def test_uuid_stop_restores_after_the_client_title_is_renamed(registry, rooms_file, light_calls, clock):
@@ -216,16 +218,15 @@ def test_uuid_stop_restores_after_the_client_title_is_renamed(registry, rooms_fi
     registry.reload()
     send("media.stop", title="Synthetic Renamed TV", uuid="uuid-living")
     assert light_calls == [("dim", ["AA:BB"]), ("restore", ["AA:BB"])]
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) == 0
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) == 0
 
 
-def test_expiry_restore_is_audited_as_playback_expiry(client, light_calls, clock):
-    import app.main as main
-
+def test_expiry_restore_is_audited_as_playback_expiry(client, light_calls, clock, playback):
     post(client, payload("media.play"))
     drain()
     clock.advance(6 * HOUR)
-    dispatcher.expire_idle_clients(lambda: main._light_audit_context(audit.correlation_id(), None, "playback_expiry"))
+    # The sweep runs on the app's event loop, as the lifespan's sweeper does: the startup connection lives there.
+    client.portal.call(client.service.expire_idle_players)
     drain()
     assert actions(light_calls) == ["dim", "restore"]
     queued = [r for r in rows(client) if r["action"] == "light.action_queued" and r["detail"]["request"] == "restore"]
@@ -251,7 +252,7 @@ def allow_list(registry, rooms_file):
 
 
 def unlisted_count():
-    return REGISTRY.get_sample_value("plex_webhook_unlisted_server_events_total") or 0
+    return sample_value("plex_webhook_unlisted_server_events_total") or 0
 
 
 def test_event_from_listed_server_is_dispatched(client, allow_list, light_calls):
@@ -261,13 +262,13 @@ def test_event_from_listed_server_is_dispatched(client, allow_list, light_calls)
 
 
 @pytest.mark.parametrize("server_uuid", ["server-other", None])
-def test_event_from_unlisted_server_is_recorded_but_not_dispatched(client, allow_list, light_calls, server_uuid):
+def test_event_from_unlisted_server_is_recorded_but_not_dispatched(client, allow_list, light_calls, server_uuid, playback):
     before = unlisted_count()
     response = post(client, from_server("media.play", server_uuid))
     drain()
     assert response.status_code == 200
     assert light_calls == []
-    assert dispatcher._active_clients == {}
+    assert playback.active_clients == {}
     assert unlisted_count() == before + 1
     assert client.conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
     raw = client.conn.execute("SELECT raw_payload FROM events").fetchone()[0]
@@ -324,7 +325,7 @@ def test_null_allow_list_means_unset(registry, rooms_file):
     assert registry.server_allowed(payload("media.play"))
 
 
-def test_sweeper_expires_with_playback_expiry_context_and_survives_errors(monkeypatch):
+def test_sweeper_expires_with_playback_expiry_context_and_survives_errors(monkeypatch, service):
     import asyncio
 
     import app.main as main
@@ -342,10 +343,10 @@ def test_sweeper_expires_with_playback_expiry_context_and_survives_errors(monkey
             raise RuntimeError("first sweep fails")
 
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(dispatcher, "expire_idle_clients", fake_expire)
-    monkeypatch.setattr(main, "_light_audit_context", lambda correlation, event_id, actor: (event_id, actor))
+    monkeypatch.setattr(service.playback, "expire_idle_clients", fake_expire)
+    monkeypatch.setattr(service, "light_audit_context", lambda correlation, event_id, actor: (event_id, actor))
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(main._expire_idle_players())
+        asyncio.run(main.expire_idle_players(service))
     assert sleeps == [main.EXPIRY_SWEEP_SECONDS] * 3
     assert len(calls) == 2  # a failed sweep does not stop the next one
     assert calls[1]() == (None, "playback_expiry")
@@ -384,20 +385,20 @@ def test_reload_drops_the_old_key_of_a_renamed_room(client, rooms_file, light_ca
 
 
 def test_expiry_of_a_removed_room_restores_without_reexporting_its_gauge(registry, rooms_file, light_calls, clock,
-                                                                          monkeypatch):
+                                                                          monkeypatch, playback):
     lifecycle = []
-    original = dispatcher._dispatch_lifecycle
-    monkeypatch.setattr(dispatcher, "_dispatch_lifecycle",
+    original = playback.dispatch_lifecycle
+    monkeypatch.setattr(playback, "dispatch_lifecycle",
                         lambda room_key, action, context: (lifecycle.append((room_key, action)),
                                                            original(room_key, action, context)))
     labels = {"room": "living_room"}
-    before = REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) or 0
+    before = sample_value("plex_dispatcher_expired_players_total", labels) or 0
     send("media.play")
     rooms_file.write_text(NO_LIVING_ROOM, encoding="utf-8")
     registry.reload()
-    dispatcher.init_room_gauges()
+    playback.init_room_gauges()
     clock.advance(6 * HOUR)
     expire()
     assert lifecycle == [("living_room", "dim"), ("living_room", "restore")]
-    assert REGISTRY.get_sample_value("plex_dispatcher_expired_players_total", labels) == before + 1
-    assert REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", labels) is None
+    assert sample_value("plex_dispatcher_expired_players_total", labels) == before + 1
+    assert sample_value("plex_dispatcher_room_active_sessions", labels) is None

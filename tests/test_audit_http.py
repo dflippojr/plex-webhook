@@ -1,9 +1,8 @@
+import dataclasses
 import json
-import importlib
 import sqlite3
 
 import pytest
-from prometheus_client import REGISTRY
 
 from app import audit
 from conftest import drain, payload, post, records, rows
@@ -70,14 +69,14 @@ def test_reload_validation_results_and_changes(client, rooms_file, registry):
 
 @pytest.mark.parametrize("endpoint", ["webhook", "rooms/reload", "rooms/validate"])
 def test_audit_failure_does_not_block_or_retry(client, rooms_file, monkeypatch, light_calls, caplog, endpoint):
-    import app.main as main
     calls = []
     def fail(*args, **kwargs):
         calls.append(kwargs)
         raise sqlite3.OperationalError("SECRET")
     monkeypatch.setattr(audit, "append", fail)
     metric = "plex_webhook_audit_write_failures_total"
-    before = REGISTRY.get_sample_value(metric) or 0
+    samples = client.service.metrics.registry
+    before = samples.get_sample_value(metric) or 0
     if endpoint == "webhook":
         response = post(client, payload("media.play", uuid="uuid-living"))
         drain()
@@ -86,12 +85,12 @@ def test_audit_failure_does_not_block_or_retry(client, rooms_file, monkeypatch, 
         rooms_file.write_text("rooms: {SECRET: {plex_clients: [{title: x}]}}", encoding="utf-8")
         response = client.post("/" + endpoint)
         if endpoint.endswith("reload"):
-            assert list(main.registry.rooms) == ["SECRET"]
+            assert list(client.service.registry.rooms) == ["SECRET"]
     assert response.status_code == 200
     # The webhook also tries its queued, decision, per-light result and summary records; each failure is counted, none retried.
     expected = 5 if endpoint == "webhook" else 1
     assert len(calls) == expected
-    assert REGISTRY.get_sample_value(metric) == before + expected
+    assert samples.get_sample_value(metric) == before + expected
     assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text.split("reason=audit_write_failed")[-1]
 
 
@@ -105,35 +104,35 @@ def test_locked_database_fail_open_reload(client, rooms_file, caplog):
 
 
 class _UnresolvablePathConnection:
-    """Stands in for main.db_conn when PRAGMA database_list itself fails."""
+    """Stands in for the service's connection when PRAGMA database_list itself fails."""
 
     def execute(self, sql, *args):
         raise sqlite3.OperationalError("SECRET")
 
 
-def test_audit_path_lookup_failure_fails_open_and_is_counted(monkeypatch, caplog):
-    import app.main as main
+def test_audit_path_lookup_failure_fails_open_and_is_counted(service, monkeypatch, caplog):
     appended = []
-    monkeypatch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
-    monkeypatch.setattr(main, "db_conn", _UnresolvablePathConnection())
     metric = "plex_webhook_audit_write_failures_total"
-    before = REGISTRY.get_sample_value(metric) or 0
-    main._record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation="c")
+    before = service.metrics.registry.get_sample_value(metric) or 0
+    with monkeypatch.context() as patch:
+        patch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
+        patch.setattr(service, "conn", _UnresolvablePathConnection())
+        service.record_audit(action="rooms.validate", outcome="validated", reason_code="valid", correlation="c")
     assert appended == []
-    assert REGISTRY.get_sample_value(metric) == before + 1
+    assert service.metrics.registry.get_sample_value(metric) == before + 1
     assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text
 
 
-def test_light_audit_context_path_lookup_failure_returns_no_context(monkeypatch, caplog):
-    import app.main as main
+def test_light_audit_context_path_lookup_failure_returns_no_context(service, monkeypatch, caplog):
     appended = []
-    monkeypatch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
-    monkeypatch.setattr(main, "db_conn", _UnresolvablePathConnection())
     metric = "plex_webhook_audit_write_failures_total"
-    before = REGISTRY.get_sample_value(metric) or 0
-    assert main._light_audit_context("corr", 1) is None
+    before = service.metrics.registry.get_sample_value(metric) or 0
+    with monkeypatch.context() as patch:
+        patch.setattr(audit, "append", lambda *args, **kwargs: appended.append(kwargs))
+        patch.setattr(service, "conn", _UnresolvablePathConnection())
+        assert service.light_audit_context("corr", 1) is None
     assert appended == []
-    assert REGISTRY.get_sample_value(metric) == before + 1
+    assert service.metrics.registry.get_sample_value(metric) == before + 1
     assert "reason=audit_write_failed" in caplog.text and "SECRET" not in caplog.text
 
 
@@ -153,32 +152,18 @@ def test_bad_form_audited_safely(client, monkeypatch):
     ("rooms: {SECRET: {lights: [{id: SECRET}]}}", "rejected", "invalid_config"),
     (None, "rejected", "config_unavailable"),
 ])
-def test_startup_config_audit(tmp_path, monkeypatch, caplog, source, outcome, reason):
-    import app.db as database
-    import app.main as main
-    import app.rooms as rooms
+def test_startup_config_audit(tmp_path, settings, make_service, caplog, source, outcome, reason):
     config = tmp_path / "startup.yaml"
     if source is not None:
         config.write_text(source, encoding="utf-8")
-    startup = rooms.RoomRegistry(config)
     path = tmp_path / "startup.db"
-    def unregister():
-        for collector in (main.EVENTS_TOTAL, main.LAST_EVENT_TIMESTAMP):
-            REGISTRY.unregister(collector)
-    unregister()
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(database, "DB_PATH", path)
-            patch.setattr(rooms, "registry", startup)
-            importlib.reload(main).db_conn.close()
-            record = records(path)[0]
-            assert record["action"] == "service.config_load" and record["source"] == "service"
-            assert record["actor_kind"] == "system" and record["actor_verified"] == 0
-            assert record["outcome"] == outcome and record["reason_code"] == reason
-            assert "SECRET" not in json.dumps(record) and "SECRET" not in caplog.text
-            unregister()
-    finally:
-        importlib.reload(main).db_conn.close()
+    # A service started on its own database and rooms file records how the configuration loaded.
+    make_service(dataclasses.replace(settings, db_path=path, rooms_config_path=config))
+    record = records(path)[0]
+    assert record["action"] == "service.config_load" and record["source"] == "service"
+    assert record["actor_kind"] == "system" and record["actor_verified"] == 0
+    assert record["outcome"] == outcome and record["reason_code"] == reason
+    assert "SECRET" not in json.dumps(record) and "SECRET" not in caplog.text
 
 
 def test_valid_numeric_metadata_and_null_groups_keep_legacy_capture(client):

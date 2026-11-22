@@ -5,10 +5,9 @@ import time
 
 import pytest
 import yaml
-from prometheus_client import REGISTRY
 
-from app import db, dispatcher, lights
-from conftest import drain, payload
+from app import dispatcher, lights
+from conftest import active_service, drain, payload
 from test_brightness import OFF, FakeController, on
 
 ACTOR = {"kind": "plex_server", "id": "plex-server", "verified": 0}
@@ -17,7 +16,7 @@ ROOMS = {room: {"plex_clients": [{"title": room}], "lights": [{"brand": "govee",
 
 
 @pytest.fixture
-def world(registry, rooms_file, monkeypatch):
+def world(registry, rooms_file, monkeypatch, playback):
     fake = FakeController()
     fake.state = {room: on(80) for room in ROOMS}
     monkeypatch.setitem(lights._controllers, "govee", fake)
@@ -29,7 +28,7 @@ def world(registry, rooms_file, monkeypatch):
         registry.reload()
 
     def event(room, name="media.play"):
-        dispatcher.handle_event(payload(name, room), context)
+        playback.handle_event(payload(name, room), context)
         drain()
 
     configure([])
@@ -60,7 +59,7 @@ def assert_identical(record, expected):
 
 
 def decisions(decision):
-    return REGISTRY.get_sample_value("plex_dispatcher_light_decisions_total",
+    return active_service().metrics.registry.get_sample_value("plex_dispatcher_light_decisions_total",
                                      {"room": "a", "decision": decision}) or 0
 
 
@@ -81,27 +80,27 @@ def test_explicit_restore_yields_to_newer_source(world):
     assert_identical(record, summary(record, "b", "restore", "skipped", "owned_by_newer_source"))
 
 
-def test_queued_automation_yields_to_playback_started_before_it_ran(world, monkeypatch):
-    monkeypatch.setitem(dispatcher._active_clients, "b", {"b": time.monotonic()})
-    dispatcher._apply("b", "dim", [{"brand": "govee", "id": "b"}], world.context, "fixed-id",
+def test_queued_automation_yields_to_playback_started_before_it_ran(world, monkeypatch, playback):
+    monkeypatch.setitem(playback.active_clients, "b", {"b": time.monotonic()})
+    playback.apply("b", "dim", [{"brand": "govee", "id": "b"}], world.context, "fixed-id",
                       {"dim": 40, "restore": 80}, automation_source="a")
     assert world.commands == []
     assert world.records == [summary({"detail": {"action_id": "fixed-id"}}, "b", "dim", "skipped",
                                      "own_playback_active")]
 
 
-def test_superseded_action_records_the_drop_reason(world):
+def test_superseded_action_records_the_drop_reason(world, playback):
     release, started = threading.Event(), threading.Event()
 
     def block():
         started.set()
         release.wait(timeout=10)
 
-    dispatcher._action_executor.submit(block)
+    playback.queue.submit(block)
     assert started.wait(timeout=5)
     try:
-        first = dispatcher._dispatch("a", "dim", world.context)
-        dispatcher._dispatch("a", "restore", world.context)
+        first = playback.dispatch("a", "dim", world.context)
+        playback.dispatch("a", "restore", world.context)
         assert first.cancelled()
     finally:
         release.set()
@@ -124,12 +123,12 @@ def off_light_records(records, action_id):
     return [r for r in records if r["detail"]["action_id"] == action_id and r["action"] != "light.action_queued"]
 
 
-def test_off_light_on_fresh_read_and_on_redim_records_the_same_skip(world):
+def test_off_light_on_fresh_read_and_on_redim_records_the_same_skip(world, playback, restore_records):
     world.state["a"] = OFF
     before = decisions("dim_skipped_off")
     for _ in range(2):  # the second dim finds the first dim's was-off record
-        dispatcher._dispatch("a", "dim", world.context).result(timeout=30)
-        assert db.get_restore_record("a", "a") == {"was_off": True, "restore_percent": None, "dim_percent": 20}
+        playback.dispatch("a", "dim", world.context).result(timeout=30)
+        assert restore_records.get_restore_record("a", "a") == {"was_off": True, "restore_percent": None, "dim_percent": 20}
     assert decisions("dim_skipped_off") - before == 2
     assert world.commands == []
     first, second = (off_light_records(world.records, s["detail"]["action_id"]) for s in summaries(world.records, "a"))
@@ -150,13 +149,13 @@ def test_off_light_on_fresh_read_and_on_redim_records_the_same_skip(world):
         ])
 
 
-def test_off_light_writes_its_record_before_the_decision_and_only_on_a_fresh_read(world, monkeypatch):
+def test_off_light_writes_its_record_before_the_decision_and_only_on_a_fresh_read(world, monkeypatch, playback, restore_records):
     world.state["a"] = OFF
     calls = []
-    put, decide = db.put_restore_record, dispatcher._decide
-    monkeypatch.setattr(db, "put_restore_record", lambda *args: (calls.append(("put", args[1:])), put(*args))[1])
-    monkeypatch.setattr(dispatcher, "_decide", lambda *args, **kwargs: (calls.append(("decide", args[5])),
+    put, decide = restore_records.put_restore_record, playback._decide
+    monkeypatch.setattr(restore_records, "put_restore_record", lambda *args: (calls.append(("put", args[1:])), put(*args))[1])
+    monkeypatch.setattr(playback, "_decide", lambda *args, **kwargs: (calls.append(("decide", args[5])),
                                                                          decide(*args, **kwargs))[1])
     for _ in range(2):
-        dispatcher._dispatch("a", "dim", world.context).result(timeout=30)
+        playback.dispatch("a", "dim", world.context).result(timeout=30)
     assert calls == [("put", ("a", True, None, 20)), ("decide", "dim_skipped_off"), ("decide", "dim_skipped_off")]

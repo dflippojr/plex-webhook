@@ -5,16 +5,14 @@ from types import SimpleNamespace
 
 import requests
 
-from app import db, lights
+from app import lights
 from conftest import drain, payload, post
 
 # Capture the real backend before the client fixture installs its light recorders.
 _prepare, _read_state, _apply_action = lights.prepare, lights.read_state, lights.apply_action
 
 
-def test_webhook_batches_discovery_and_restores_three_lights(client, rooms_file, registry, monkeypatch, tmp_path):
-    from app import main
-
+def test_webhook_batches_discovery_and_restores_three_lights(client, rooms_file, registry, monkeypatch, restore_records):
     rooms_file.write_text("""
 rooms:
   cinema:
@@ -28,8 +26,6 @@ rooms:
       - {brand: govee, id: G2, model: H6159}
 """, encoding="utf-8")
     registry.reload()
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "restore.db")
-    db.get_connection().close()  # startup migrates the file; restore-record calls run no DDL
     monkeypatch.setattr(lights, "_secrets_cache", {})
     monkeypatch.setenv("GOVEE_API_KEY", "synthetic-cloud-key")
     # Explicitly undo all three light backend recorders from the client fixture.
@@ -97,7 +93,7 @@ rooms:
                         for name, value in (("turn", "on"), ("brightness", 20))]
         assert commands == dim_commands
         assert all(value == {"powerState": "on", "brightness": 20} for value in state.values())
-        assert [db.get_restore_record("cinema", device) for device in state] == [
+        assert [restore_records.get_restore_record("cinema", device) for device in state] == [
             {"was_off": False, "restore_percent": 70, "dim_percent": 20}
         ] * 3
 
@@ -109,7 +105,7 @@ rooms:
                             for name, value in (("turn", "on"), ("brightness", 70))]
         assert commands == dim_commands + restore_commands
         assert all(value == {"powerState": "on", "brightness": 70} for value in state.values())
-        assert db.rooms_with_restore_records() == set()
+        assert restore_records.rooms_with_restore_records() == set()
         assert datagrams == [(
             {"msg": {"cmd": "scan", "data": {"account_topic": "reserve"}}},
             (lights.GOVEE_LAN_SCAN_MULTICAST_ADDR, lights.GOVEE_LAN_SCAN_PORT),
@@ -139,5 +135,3 @@ rooms:
     finally:
         # Settle queued work before monkeypatch restores network/backend boundaries.
         drain()
-        for event in ("media.play", "media.stop"):
-            main.EVENTS_TOTAL.remove(event, "Synthetic TV", "known")

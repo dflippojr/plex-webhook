@@ -1,20 +1,12 @@
 import json
-import os
 from contextlib import closing
 from pathlib import Path
 
 from app import storage
 from app.audit import WRITE_LOCK, utc_now
 
-DB_PATH = Path(os.environ.get("DB_PATH", "/data/plex_events.db"))
-
 # The events and restore-record tables as one script; app.storage owns the DDL and its migrations.
 SCHEMA = storage.EVENTS_SCHEMA
-
-
-def get_connection():
-    """The service's startup connection: enables WAL and applies pending migrations (app.storage)."""
-    return storage.open_database(DB_PATH)
 
 
 # Payload values insert_event stores, as (group, field names), in the order of their
@@ -99,64 +91,62 @@ def list_known_clients(conn):
 # --- light restore records ----------------------------------------------------
 # One row per (room, light) between a dim and its restore. Each call owns its
 # connection so the light-action worker never shares the request connection. The
-# tables exist already: startup's get_connection migrated the file.
+# tables exist already: service startup migrated the file (app.storage.open_database).
 
 
-def _restore_conn():
-    return storage.connect(DB_PATH)
+class RestoreRecords:
+    """Restore records and automation owners in the service's database file."""
 
+    def __init__(self, path):
+        self.path = Path(path)
 
-def get_restore_record(room, light_id):
-    with closing(_restore_conn()) as conn:
-        row = conn.execute(
-            "SELECT was_off, restore_percent, dim_percent FROM light_restore_records WHERE room = ? AND light_id = ?",
-            (room, light_id),
-        ).fetchone()
-    return {"was_off": bool(row[0]), "restore_percent": row[1], "dim_percent": row[2]} if row else None
+    def _connect(self):
+        return storage.connect(self.path)
 
+    def get_restore_record(self, room, light_id):
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT was_off, restore_percent, dim_percent FROM light_restore_records WHERE room = ? AND light_id = ?",
+                (room, light_id),
+            ).fetchone()
+        return {"was_off": bool(row[0]), "restore_percent": row[1], "dim_percent": row[2]} if row else None
 
-def put_restore_record(room, light_id, was_off, restore_percent, dim_percent):
-    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO light_restore_records VALUES (?, ?, ?, ?, ?, ?)",
-            (room, light_id, 1 if was_off else 0, restore_percent, dim_percent, utc_now()),
-        )
+    def put_restore_record(self, room, light_id, was_off, restore_percent, dim_percent):
+        with WRITE_LOCK, closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO light_restore_records VALUES (?, ?, ?, ?, ?, ?)",
+                (room, light_id, 1 if was_off else 0, restore_percent, dim_percent, utc_now()),
+            )
 
+    def delete_restore_record(self, room, light_id):
+        with WRITE_LOCK, closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM light_restore_records WHERE room = ? AND light_id = ?", (room, light_id))
 
-def delete_restore_record(room, light_id):
-    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
-        conn.execute("DELETE FROM light_restore_records WHERE room = ? AND light_id = ?", (room, light_id))
+    def set_automation_owner(self, target_room, trigger_room):
+        """The latest dim owns the target's pending restore; own playback clears ownership."""
+        with WRITE_LOCK, closing(self._connect()) as conn, conn:
+            if trigger_room is None:
+                conn.execute("DELETE FROM automation_room_owners WHERE target_room = ?", (target_room,))
+            else:
+                conn.execute("INSERT OR REPLACE INTO automation_room_owners VALUES (?, ?)",
+                             (target_room, trigger_room))
 
+    def automation_owner(self, target_room):
+        """The trigger room that owns the target's pending automatic restore, or None."""
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT trigger_room FROM automation_room_owners WHERE target_room = ?",
+                               (target_room,)).fetchone()
+        return row[0] if row else None
 
-def set_automation_owner(target_room, trigger_room):
-    """The latest dim owns the target's pending restore; own playback clears ownership."""
-    with WRITE_LOCK, closing(_restore_conn()) as conn, conn:
-        if trigger_room is None:
-            conn.execute("DELETE FROM automation_room_owners WHERE target_room = ?", (target_room,))
-        else:
-            conn.execute("INSERT OR REPLACE INTO automation_room_owners VALUES (?, ?)",
-                         (target_room, trigger_room))
+    def automation_targets(self, trigger_room):
+        with closing(self._connect()) as conn:
+            return {row[0] for row in conn.execute(
+                "SELECT target_room FROM automation_room_owners WHERE trigger_room = ?", (trigger_room,))}
 
+    def automation_sources(self):
+        with closing(self._connect()) as conn:
+            return {row[0] for row in conn.execute("SELECT DISTINCT trigger_room FROM automation_room_owners")}
 
-def automation_owner(target_room):
-    """The trigger room that owns the target's pending automatic restore, or None."""
-    with closing(_restore_conn()) as conn:
-        row = conn.execute("SELECT trigger_room FROM automation_room_owners WHERE target_room = ?",
-                           (target_room,)).fetchone()
-    return row[0] if row else None
-
-
-def automation_targets(trigger_room):
-    with closing(_restore_conn()) as conn:
-        return {row[0] for row in conn.execute(
-            "SELECT target_room FROM automation_room_owners WHERE trigger_room = ?", (trigger_room,))}
-
-
-def automation_sources():
-    with closing(_restore_conn()) as conn:
-        return {row[0] for row in conn.execute("SELECT DISTINCT trigger_room FROM automation_room_owners")}
-
-
-def rooms_with_restore_records():
-    with closing(_restore_conn()) as conn:
-        return {row[0] for row in conn.execute("SELECT DISTINCT room FROM light_restore_records")}
+    def rooms_with_restore_records(self):
+        with closing(self._connect()) as conn:
+            return {row[0] for row in conn.execute("SELECT DISTINCT room FROM light_restore_records")}

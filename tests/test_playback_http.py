@@ -1,11 +1,10 @@
 """Playback journeys through HTTP, with only physical light I/O replaced."""
 import json
-from pathlib import Path
 
 import pytest
 from prometheus_client.parser import text_string_to_metric_families
 
-from app import db, dispatcher, lights
+from app import lights
 from conftest import drain, payload, post, rows
 
 # Capture these before conftest.client installs its light recorder.
@@ -110,7 +109,7 @@ class PlaybackJourney:
                 sample(self.before, "plex_dispatcher_actions_total", room=room, action=action) + delta
             )
         assert self.physical.state[light_id] == brightness
-        record = db.get_restore_record(room, light_id)
+        record = self.client.service.records.get_restore_record(room, light_id)
         if active:
             assert record == {"was_off": False, "restore_percent": self.initial[light_id], "dim_percent": 20}
         else:
@@ -118,7 +117,7 @@ class PlaybackJourney:
 
 
 @pytest.fixture
-def journey(client, registry, monkeypatch):
+def journey(client, registry, monkeypatch, playback):
     """The shared fixture owns/closes the local TestClient and event connection."""
     monkeypatch.setattr(lights, "prepare", REAL_PREPARE)
     monkeypatch.setattr(lights, "read_state", REAL_READ_STATE)
@@ -126,10 +125,8 @@ def journey(client, registry, monkeypatch):
     physical = PhysicalLights()
     monkeypatch.setitem(lights._controllers, "govee", physical)
     monkeypatch.setitem(lights._controllers, "tuya", physical)
-    # Restore storage, raw capture and audit use the same disposable SQLite file.
-    path = Path(client.conn.execute("PRAGMA database_list").fetchone()[2])
-    monkeypatch.setattr(db, "DB_PATH", path)
-    dispatcher.init_room_gauges()
+    # Restore storage, raw capture and audit already share the service's disposable SQLite file.
+    playback.init_room_gauges()
     world = PlaybackJourney(client, physical)
     try:
         yield world

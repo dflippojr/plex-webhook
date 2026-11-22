@@ -117,16 +117,16 @@ def test_unavailable_controller_omits_free_text(monkeypatch, caplog, brand):
 
 
 @pytest.mark.parametrize("failure_stage", ["lookup", "backend"])
-def test_dispatcher_failure_and_later_action(monkeypatch, caplog, failure_stage):
+def test_dispatcher_failure_and_later_action(monkeypatch, caplog, failure_stage, playback):
     sentinel = "synthetic-dispatcher-" + failure_stage
-    monkeypatch.setattr(dispatcher.registry, "lights_for", lambda room: [])
+    monkeypatch.setattr(playback.registry, "lights_for", lambda room: [])
     monkeypatch.setattr(lights, "apply_action", lambda *a, **k: [])  # the room has no lights, so no results
-    target, attribute = (dispatcher.registry, "lights_for") if failure_stage == "lookup" else (lights, "apply_action")
+    target, attribute = (playback.registry, "lights_for") if failure_stage == "lookup" else (lights, "apply_action")
     with caplog.at_level(logging.INFO, logger="plex-webhook"), monkeypatch.context() as patch:
         patch.setattr(target, attribute, fail(sentinel))
-        dispatcher._dispatch("private-room-input", "private-action").result(timeout=5)
+        playback.dispatch("private-room-input", "private-action").result(timeout=5)
     assert_safe(caplog, sentinel, "private-room-input", "private-action")
     assert "dispatcher_action_failed" in caplog.text
-    before = dispatcher.DISPATCH_ACTIONS_TOTAL.labels(room="test", action="restore")._value.get()
-    dispatcher._dispatch("test", "restore").result(timeout=5)
-    assert dispatcher.DISPATCH_ACTIONS_TOTAL.labels(room="test", action="restore")._value.get() == before + 1
+    before = playback.metrics.dispatch_actions.labels(room="test", action="restore")._value.get()
+    playback.dispatch("test", "restore").result(timeout=5)
+    assert playback.metrics.dispatch_actions.labels(room="test", action="restore")._value.get() == before + 1

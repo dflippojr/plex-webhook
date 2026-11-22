@@ -1,19 +1,17 @@
-"""Shared fixtures: fake data only, no network, no /data or /config on the host."""
+"""Shared fixtures: fake data only, no network, no /data or /config on the host.
+
+Every test that needs the service builds its own (``service``, ``playback``, ``client``)
+from ``settings`` that point into its tmp_path. Importing ``app`` opens nothing.
+"""
+import dataclasses
 import json
 import os
 import socket
 import sqlite3
-import tempfile
-from pathlib import Path
 
 import pytest
 
-# The app reads these paths at import time, so point them at a scratch
-# directory before anything imports `app`.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="plex-webhook-tests-"))
-os.environ["DB_PATH"] = str(_SCRATCH / "data" / "plex_events.db")
-os.environ["ROOMS_CONFIG_PATH"] = str(_SCRATCH / "rooms.yaml")
-os.environ["DEVICES_SECRETS_PATH"] = str(_SCRATCH / "devices.secrets.yaml")
+# Device credentials are read where they are used; none may leak in from the host.
 for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "WEBHOOK_TOKEN"):
     os.environ.pop(_name, None)
 
@@ -77,15 +75,61 @@ def rooms_file(tmp_path):
 
 
 @pytest.fixture
-def registry(rooms_file):
-    """The module-level registry, pointed at the test rooms file."""
-    from app.rooms import EMPTY_STATE, registry as reg
+def settings(tmp_path, rooms_file):
+    """Settings for a service whose files all live in this test's tmp_path."""
+    from app.settings import Settings
 
-    reg.config_path = rooms_file
-    reg.reload()
-    yield reg
-    reg.config_path = Path(os.environ["ROOMS_CONFIG_PATH"])
-    reg._state = EMPTY_STATE
+    return Settings(db_path=tmp_path / "data" / "plex_events.db", rooms_config_path=rooms_file,
+                    devices_secrets_path=tmp_path / "devices.secrets.yaml")
+
+
+# Services the running test built, newest last; drain() waits on the newest one's queue.
+_services = []
+
+
+@pytest.fixture
+def make_service(settings):
+    """Build and start a Service (no HTTP app); every one built is stopped after the test."""
+    from app.service import Service
+
+    built = []
+
+    def make(service_settings=settings):
+        service = Service(service_settings).start()
+        built.append(service)
+        _services.append(service)
+        return service
+
+    yield make
+    for service in built:
+        _services.remove(service)
+        service.stop()
+
+
+@pytest.fixture
+def service(request, make_service):
+    """The test's Service: the app's when the test also uses ``client``, else one built for it."""
+    if "client" in request.fixturenames:
+        return request.getfixturevalue("client").service
+    return make_service()
+
+
+@pytest.fixture
+def registry(service):
+    """The service's room registry, loaded from the test rooms file."""
+    return service.registry
+
+
+@pytest.fixture
+def playback(service):
+    """The service's playback state: player state, restore records and the light-action queue."""
+    return service.playback
+
+
+@pytest.fixture
+def restore_records(service):
+    """The service's restore records (app.db.RestoreRecords)."""
+    return service.records
 
 
 def accepted_result(light):
@@ -119,26 +163,6 @@ def light_calls(monkeypatch):
     monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())
     monkeypatch.setattr(lights, "prepare", lambda room_lights: None)
     return calls
-
-
-def _reset_restore_state(dispatcher):
-    from app import db
-
-    dispatcher._active_clients.clear()
-    dispatcher._activating_uuids.clear()
-    dispatcher._pending_rooms.clear()
-    with db.get_connection() as conn:
-        conn.execute("DELETE FROM light_restore_records")
-        conn.execute("DELETE FROM automation_room_owners")
-
-
-@pytest.fixture(autouse=True)
-def clean_dispatcher():
-    from app import dispatcher
-
-    _reset_restore_state(dispatcher)
-    yield
-    _reset_restore_state(dispatcher)
 
 
 @pytest.fixture
@@ -189,29 +213,38 @@ def _token_test_client():
     return TokenClient
 
 
-@pytest.fixture
-def client(request, tmp_path, monkeypatch, registry, light_calls):
-    from fastapi.testclient import TestClient
-    import app.main as main
+def client_settings(request, settings):
+    """``settings``, with the webhook token configured for the token journeys."""
     from app import auth
 
-    # TestClient runs handlers in another thread; production audit writers own
-    # their connections instead of sharing this legacy test connection.
-    conn = sqlite3.connect(tmp_path / "events.db", check_same_thread=False)
-    migrated(conn)
+    if getattr(request, "param", "no_token") != "token":
+        return settings
+    return dataclasses.replace(settings, webhook_token_digest=auth.webhook_token_digest(WEBHOOK_TOKEN))
+
+
+@pytest.fixture
+def client(request, tmp_path, monkeypatch, settings, light_calls):
+    """A TestClient on a freshly built app; ``client.service`` is the Service its lifespan started."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
     monkeypatch.setenv("ADMIN_API_TOKEN", ADMIN_TOKEN)
-    monkeypatch.setitem(main._denial_window, "start", 0.0)
-    monkeypatch.setitem(main._denial_window, "count", 0)
-    monkeypatch.setattr(main, "db_conn", conn)
-    if getattr(request, "param", "no_token") == "token":
-        monkeypatch.setenv("WEBHOOK_TOKEN", WEBHOOK_TOKEN)
-        monkeypatch.setattr(main, "WEBHOOK_TOKEN_DIGEST", auth.webhook_token_digest())
+    test_settings = client_settings(request, settings)
+    if test_settings.webhook_token_digest is not None:
         TestClient = _token_test_client()
-    with TestClient(main.app) as c:
+    app = create_app(test_settings)
+    with TestClient(app) as c:
+        c.service = app.state.service
+        _services.append(c.service)
         c.admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
         c.headers.update(c.admin)  # webhook posts ignore it; admin routes need it
-        c.conn, c.log = conn, tmp_path / "events.jsonl"
-        yield c
+        # The test's own read connection to the service's database file.
+        c.conn = conn = sqlite3.connect(test_settings.db_path, check_same_thread=False)
+        c.log = tmp_path / "events.jsonl"
+        try:
+            yield c
+        finally:
+            _services.remove(c.service)
     try:
         # The retired events.jsonl is never written again (#183).
         assert not c.log.exists()
@@ -238,11 +271,14 @@ def payload(event, title="Living Room TV", uuid=None, account="dan"):
     }
 
 
-def drain():
-    """Wait for queued light actions (they run on the dispatcher's worker thread)."""
-    from app import dispatcher
+def active_service():
+    """The newest service the running test built, for module helpers that take no fixture."""
+    return _services[-1]
 
-    dispatcher._action_executor.submit(lambda: None).result(timeout=30)
+
+def drain(service=None):
+    """Wait for queued light actions (they run on the service's worker thread); defaults to the newest service."""
+    (service or active_service()).queue.drain(timeout=30)
 
 
 def post(client, body):
@@ -258,5 +294,6 @@ def records(path):
 
 
 def rows(client):
+    """The client's audit trail after startup: the app's own service.config_load record is left out."""
     path = client.conn.execute("PRAGMA database_list").fetchone()[2]
-    return records(path)
+    return [record for record in records(path) if record["action"] != "service.config_load"]

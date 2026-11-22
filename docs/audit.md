@@ -28,7 +28,7 @@ CLI. Protect the database, backups and exports with owner-only filesystem ACLs.
 - `lights.check`: a read-only `GET /rooms/{room}/lights` by the admin token, with the
   room key as target: `completed/read`, `rejected/unknown_room` (no target, since the
   key is not configured), or `failed` with `timed_out`, `queue_overflow`,
-  `superseded` or `check_error`. Per-light readings are never recorded.
+  `superseded`, `shutdown` or `check_error`. Per-light readings are never recorded.
 - `service.config_load`: the startup load result, including failure with an
   empty mapping. Its actor is the system. Reload/validation by a valid admin token
   records actor `admin_token`/`owner-admin`, verified (a shared client
@@ -125,12 +125,22 @@ sharing the **receipt's `correlation_id`** and one `detail.action_id`:
 3. `light.result` per light (target = configured light ID), in order. A failing light never
    stops later lights or actions.
 4. `light.action_summary` (target = room key): the terminal record. Without it the action
-   is **incomplete** (for example after abrupt termination); commands are never replayed on
-   restart and success is never synthesized.
+   is **incomplete** (for example after abrupt termination, or an action still running when
+   a graceful stop's wait ran out); commands are never replayed on restart and success is
+   never synthesized.
 
 An action dropped before it started has only the queued record and a `skipped` summary
 with no decisions or results: `superseded` when a newer action for the same room replaced
-it, `queue_overflow` when the bounded queue pushed it out. An automation that yields to its
+it, `queue_overflow` when the bounded queue pushed it out, `shutdown` when the service
+stopped before running it. On a graceful stop (SIGTERM, for example a container recreate)
+the container's server gives in-flight requests 3 seconds (`--timeout-graceful-shutdown` in
+the Dockerfile `CMD`), then the service stops taking new work and spends at most 5 seconds
+on queued actions, together under Docker's default 10-second stop timeout. Queued actions
+get the first 4 seconds to finish; every action still queued then is dropped as `shutdown`,
+and their summaries are written in the last second. Every wait in that cleanup, for the
+service's write lock and for SQLite's, ends by the same deadline. Actions whose summary
+misses it get none: the log line `reason=shutdown_drops_unaudited count=N` records how many,
+and they read as incomplete. An action already running is never interrupted. An automation that yields to its
 target room's own playback is summarized as `skipped/own_playback_active`. A restore trigger's
 explicit `restore` entry that yields to a target owned by another (newer) source is
 summarized as `skipped/owned_by_newer_source`. Queued automation

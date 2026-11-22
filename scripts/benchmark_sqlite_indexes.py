@@ -14,7 +14,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from app import db
+from app import db, storage
 
 INDEX_NAMES = ("idx_events_player_labels_cover", "idx_events_clients_cover")
 QUERIES = {"event_counts": db.event_counts, "list_known_clients": db.list_known_clients}
@@ -101,18 +101,14 @@ def benchmark(scratch, count, writes):
     shutil.copyfile(baseline_path, indexed_path)
 
     # Measure the actual first-open migration on a populated legacy database.
-    original_path = db.DB_PATH
-    try:
-        db.DB_PATH = indexed_path
-        start = time.perf_counter()
-        indexed = db.get_connection()
-        first_open_ms = (time.perf_counter() - start) * 1000
-        indexed.close()
-        start = time.perf_counter()
-        indexed = db.get_connection()
-        second_open_ms = (time.perf_counter() - start) * 1000
-    finally:
-        db.DB_PATH = original_path
+    # storage.open_database is the service's startup open: WAL plus pending migrations.
+    start = time.perf_counter()
+    indexed = storage.open_database(indexed_path)
+    first_open_ms = (time.perf_counter() - start) * 1000
+    indexed.close()
+    start = time.perf_counter()
+    indexed = storage.open_database(indexed_path)
+    second_open_ms = (time.perf_counter() - start) * 1000
 
     baseline = sqlite3.connect(baseline_path)
     try:

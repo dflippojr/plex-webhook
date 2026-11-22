@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
-from app import storage
+from app import deadline as deadlines, storage
 
 # The audit table as one script; app.storage owns the DDL and its migrations.
 SCHEMA = storage.AUDIT_SCHEMA
@@ -59,7 +59,7 @@ OPERATIONS = {
     # A read-only light check; per-light values never enter the trail.
     "lights.check": ("http", "anonymous", "room", {
         "completed": {"read"}, "rejected": {"unknown_room"},
-        "failed": {"timed_out", "queue_overflow", "superseded", "check_error"},
+        "failed": {"timed_out", "queue_overflow", "superseded", "shutdown", "check_error"},
         "denied": set(DENIAL_REASONS),
     }),
     "clients.read": ("http", "anonymous", "clients", {"denied": set(DENIAL_REASONS)}),
@@ -81,7 +81,7 @@ OPERATIONS = {
         "unconfirmed": {"all_unconfirmed", "some_unconfirmed", "no_results"},
         "failed": {"all_failed", "dispatcher_error"},
         "skipped": {"all_skipped", "no_lights", "own_playback_active", "owned_by_newer_source", "superseded",
-                    "queue_overflow"},
+                    "queue_overflow", "shutdown"},
     }),
 }
 LIGHT_REQUESTS = {"dim", "restore"}
@@ -94,6 +94,8 @@ DETAIL_ACTIONS = {"light.action_queued", "light.result", "light.decision", "ligh
 RECORD_COLUMNS = ("recorded_at", "correlation_id", "source", "actor_kind", "actor_id", "actor_verified",
                   "action", "target_kind", "target_id", "outcome", "reason_code", "changed_fields", "checksum")
 WRITE_LOCK = RLock()
+# How long one audit write waits for another connection's SQLite write lock (seconds).
+LOCK_WAIT_S = 0.25
 
 
 def utc_now():
@@ -203,8 +205,11 @@ def clean_detail(action, detail):
 
 
 def append(path, *, action, outcome, reason_code, correlation, changed_fields=None, event_id=None,
-           admin=False, target_id=None, detail=None):
+           admin=False, target_id=None, detail=None, deadline=None):
     """Insert one validated record using an owned connection and bounded lock wait.
+
+    With a ``deadline`` (a shutdown's), the WRITE_LOCK wait and the SQLite busy wait both
+    end by it, and app.deadline.DeadlineExceeded is raised, writing nothing, once it passes.
 
     A later worker may call this contract with its own path/correlation; it must
     never share main.db_conn. Only the operations above are supported in v1.
@@ -245,12 +250,18 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     # mode=rw prevents accidentally creating a second database after a bad path. The table
     # and its detail column exist already: service startup migrated the file (app.storage).
     uri = Path(path).resolve().as_uri() + "?mode=rw"
-    with WRITE_LOCK, closing(storage.connect(uri, uri=True, timeout=0.25)) as conn, conn:
-        cursor = conn.execute(
-            """INSERT INTO audit_events (
-                recorded_at, correlation_id, source, actor_kind, actor_id, actor_verified,
-                action, target_kind, target_id, outcome, reason_code, changed_fields, checksum, detail
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            tuple(record[key] for key in RECORD_COLUMNS) + (detail_json,),
-        )
+    deadlines.acquire(WRITE_LOCK, deadline)
+    try:
+        left = deadlines.remaining(deadline)
+        busy = LOCK_WAIT_S if left is None else min(LOCK_WAIT_S, left)
+        with closing(storage.connect(uri, uri=True, timeout=busy)) as conn, conn:
+            cursor = conn.execute(
+                """INSERT INTO audit_events (
+                    recorded_at, correlation_id, source, actor_kind, actor_id, actor_verified,
+                    action, target_kind, target_id, outcome, reason_code, changed_fields, checksum, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tuple(record[key] for key in RECORD_COLUMNS) + (detail_json,),
+            )
+    finally:
+        WRITE_LOCK.release()
     return cursor.lastrowid

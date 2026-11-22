@@ -1,12 +1,10 @@
 import logging
-import os
 from pathlib import Path
 from typing import NamedTuple
 
 import yaml
 
 logger = logging.getLogger("plex-webhook")
-CONFIG_PATH = Path(os.environ.get("ROOMS_CONFIG_PATH", "/config/rooms.yaml"))
 
 
 DEFAULT_DIM_PERCENT = 20
@@ -278,7 +276,10 @@ def _client_label(state: RoomState, room: str) -> str:
 
 
 class RoomRegistry:
-    def __init__(self, config_path: Path = CONFIG_PATH):
+    """The validated rooms configuration. Constructing one reads ``config_path``; a missing or
+    invalid file leaves empty mappings, and the reason is kept for the startup audit record."""
+
+    def __init__(self, config_path: Path):
         self.config_path = config_path
         self._state = EMPTY_STATE
         self.load_outcome, self.load_reason = "rejected", "config_unavailable"
@@ -372,5 +373,3 @@ class RoomRegistry:
     def lights_for(self, room_key: str) -> list:
         return self.rooms.get(room_key, {}).get("lights", [])
 
-
-registry = RoomRegistry()

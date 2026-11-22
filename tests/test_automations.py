@@ -7,7 +7,7 @@ import yaml
 
 from app import db, dispatcher, lights
 from app.rooms import RoomConfigError
-from conftest import drain, payload
+from conftest import active_service, drain, payload
 from test_action_queue import trail  # noqa: F401 (fixture)
 from test_brightness import FakeController, OFF, on
 
@@ -35,20 +35,20 @@ def world(registry, rooms_file, monkeypatch):
 
 
 def event(room, name="media.play", wait=True, context=None):
-    dispatcher.handle_event(payload(name, room), context)
+    active_service().playback.handle_event(payload(name, room), context)
     if wait:
         drain()
 
 
 @pytest.mark.parametrize("restore_event", ["media.pause", "media.stop"])
-def test_dim_then_source_restore_restores_target(world, restore_event):
+def test_dim_then_source_restore_restores_target(world, restore_event, restore_records):
     event("a")
     assert world.commands == [("dim", "a", 20), ("dim", "b", 40)]
-    assert db.automation_targets("a") == {"b"}
+    assert restore_records.automation_targets("a") == {"b"}
     event("a", restore_event)
     assert world.commands[-2:] == [("restore", "a", 80), ("restore", "b", 80)]
-    assert db.automation_targets("a") == set()
-    assert db.rooms_with_restore_records() == set()
+    assert restore_records.automation_targets("a") == set()
+    assert restore_records.rooms_with_restore_records() == set()
 
 
 def test_restore_trigger_can_set_a_level_and_next_restore_cleans_it_up(world):
@@ -61,35 +61,35 @@ def test_restore_trigger_can_set_a_level_and_next_restore_cleans_it_up(world):
     assert world.commands[-2:] == [("restore", "b", 80), ("dim", "b", 55)]
 
 
-def test_explicit_restore_action_and_latest_trigger(world):
+def test_explicit_restore_action_and_latest_trigger(world, restore_records):
     world.configure([rule(), rule("c", "dim", "b", "restore")])
     event("a")
     event("c")
     assert world.commands[-1] == ("restore", "b", 80)
-    assert db.automation_targets("a") == set()
+    assert restore_records.automation_targets("a") == set()
     before = list(world.commands)
     event("a", "media.stop")
     assert world.commands == before + [("restore", "a", 80)]
 
 
-def test_older_source_explicit_restore_cannot_undo_newer_automation(world):
+def test_older_source_explicit_restore_cannot_undo_newer_automation(world, restore_records):
     world.configure([rule(), rule(event="restore", action="restore"), rule("c", action=60)])
     event("a")
     event("c")
-    assert world.state["b"].brightness == 60 and db.automation_targets("c") == {"b"}
+    assert world.state["b"].brightness == 60 and restore_records.automation_targets("c") == {"b"}
     event("a", "media.stop")
     assert world.state["b"].brightness == 60
-    assert db.automation_targets("c") == {"b"}
+    assert restore_records.automation_targets("c") == {"b"}
     event("c", "media.stop")
     assert world.state["b"].brightness == 80
-    assert db.automation_targets("c") == set()
-    assert db.rooms_with_restore_records() == set()
+    assert restore_records.automation_targets("c") == set()
+    assert restore_records.rooms_with_restore_records() == set()
 
 
-def test_explicit_restore_still_acts_on_unowned_and_own_targets(world):
+def test_explicit_restore_still_acts_on_unowned_and_own_targets(world, restore_records):
     world.configure([rule(event="restore", action="restore")])
     event("a")
-    db.set_automation_owner("b", None)  # nobody owns the pending restore record
+    restore_records.set_automation_owner("b", None)  # nobody owns the pending restore record
     event("a", "media.stop")
     assert world.state["b"].brightness == 80
 
@@ -107,24 +107,24 @@ def test_target_playback_blocks_automation_dim_and_restore(world, target_action)
     assert world.commands[-1] == ("restore", "b", 80)
 
 
-def test_target_playback_takes_over_existing_automation_record(world):
+def test_target_playback_takes_over_existing_automation_record(world, restore_records):
     event("a")
     event("b")
-    assert db.get_restore_record("b", "b") == {"was_off": False, "restore_percent": 80, "dim_percent": 20}
-    assert db.automation_targets("a") == set()
+    assert restore_records.get_restore_record("b", "b") == {"was_off": False, "restore_percent": 80, "dim_percent": 20}
+    assert restore_records.automation_targets("a") == set()
     event("a", "media.stop")
     assert world.state["b"].brightness == 20
     event("b", "media.stop")
     assert world.state["b"].brightness == 80
 
 
-def test_latest_automation_owns_restore_and_preserves_original_level(world):
+def test_latest_automation_owns_restore_and_preserves_original_level(world, restore_records):
     world.configure([rule(), rule("c", action=60)])
     event("a")
     event("c")
     assert world.state["b"].brightness == 60
-    assert db.automation_targets("a") == set()
-    assert db.automation_targets("c") == {"b"}
+    assert restore_records.automation_targets("a") == set()
+    assert restore_records.automation_targets("c") == {"b"}
     event("a", "media.stop")
     assert world.state["b"].brightness == 60
     event("c", "media.stop")
@@ -132,13 +132,13 @@ def test_latest_automation_owns_restore_and_preserves_original_level(world):
 
 
 @pytest.mark.parametrize("manual", [on(70), OFF])
-def test_manual_change_blocks_automated_restore(world, manual):
+def test_manual_change_blocks_automated_restore(world, manual, restore_records):
     event("a")
     world.state["b"] = manual
     event("a", "media.stop")
     assert world.state["b"] == manual
     assert [command for command in world.commands if command[1] == "b"] == [("dim", "b", 40)]
-    assert db.get_restore_record("b", "b") is None
+    assert restore_records.get_restore_record("b", "b") is None
 
 
 def test_off_light_stays_off(world):
@@ -149,13 +149,13 @@ def test_off_light_stays_off(world):
     assert world.state["b"] == OFF
 
 
-def test_restart_restores_targets_even_when_source_has_no_lights(world, registry):
+def test_restart_restores_targets_even_when_source_has_no_lights(world, registry, playback):
     registry.rooms["a"]["lights"] = []
     event("a")
-    dispatcher._active_clients.clear()
-    dispatcher._pending_rooms.clear()
-    dispatcher._load_pending_rooms()
-    assert "a" in dispatcher._pending_rooms
+    playback.active_clients.clear()
+    playback.pending_rooms.clear()
+    playback.load_pending_rooms()
+    assert "a" in playback.pending_rooms
     event("a", "media.stop")
     assert world.commands[-1] == ("restore", "b", 80)
 
@@ -176,13 +176,13 @@ def test_config_reload_keeps_pending_restore_owner(world):
 AUTOMATION_FAILED = "reason=dispatcher_action_failed operation=automation"
 
 
-def test_automation_error_is_logged_and_worker_continues(world, monkeypatch, caplog):
+def test_automation_error_is_logged_and_worker_continues(world, monkeypatch, caplog, restore_records):
     event("a")
 
     def broken(source):
         raise RuntimeError("synthetic failure")
 
-    monkeypatch.setattr(dispatcher.db, "automation_targets", broken)
+    monkeypatch.setattr(restore_records, "automation_targets", broken)
     with caplog.at_level(logging.ERROR, logger=dispatcher.logger.name):
         event("a", "media.stop")
     assert [r.getMessage() for r in caplog.records].count(AUTOMATION_FAILED) == 1
@@ -192,9 +192,9 @@ def test_automation_error_is_logged_and_worker_continues(world, monkeypatch, cap
     assert world.commands[-1] == ("dim", "c", 20)
 
 
-def test_restore_skips_owned_target_removed_by_reload(world, trail, caplog):
+def test_restore_skips_owned_target_removed_by_reload(world, trail, caplog, restore_records):
     event("a")
-    assert db.automation_targets("a") == {"b"}
+    assert restore_records.automation_targets("a") == {"b"}
     world.configure([], drop={"b"})
     before = list(world.commands)
     with caplog.at_level(logging.ERROR, logger=dispatcher.logger.name):
@@ -207,7 +207,7 @@ def test_restore_skips_owned_target_removed_by_reload(world, trail, caplog):
     assert all(target["id"] != "b" for r in light_records for target in r["detail"].get("targets", ()))
 
 
-def test_queued_automation_yields_to_new_playback(world):
+def test_queued_automation_yields_to_new_playback(world, playback):
     release = threading.Event()
     started = threading.Event()
 
@@ -215,7 +215,7 @@ def test_queued_automation_yields_to_new_playback(world):
         started.set()
         release.wait(timeout=10)
 
-    dispatcher._action_executor.submit(block)
+    playback.queue.submit(block)
     assert started.wait(timeout=5)
     try:
         event("a", wait=False)
@@ -226,9 +226,9 @@ def test_queued_automation_yields_to_new_playback(world):
     assert [command for command in world.commands if command[1] == "b"] == [("dim", "b", 20)]
 
 
-def test_queued_automation_snapshots_config(world):
+def test_queued_automation_snapshots_config(world, playback):
     release = threading.Event()
-    dispatcher._action_executor.submit(lambda: release.wait(timeout=10))
+    playback.queue.submit(lambda: release.wait(timeout=10))
     try:
         event("a", wait=False)
         world.configure([rule(action=90)])
@@ -238,10 +238,10 @@ def test_queued_automation_snapshots_config(world):
     assert world.commands[-1] == ("dim", "b", 40)
 
 
-def test_automation_is_audited_with_receipt_correlation(world):
+def test_automation_is_audited_with_receipt_correlation(world, playback):
     records = []
     context = dispatcher.AuditContext(lambda **fields: records.append(fields), "source-receipt")
-    dispatcher.handle_event(payload("media.play", "a"), context)
+    playback.handle_event(payload("media.play", "a"), context)
     drain()
     queued = [record for record in records if record["action"] == "light.action_queued"
               and record["target_id"] == "b"]
@@ -252,10 +252,10 @@ def test_automation_is_audited_with_receipt_correlation(world):
                for record in records)
 
 
-def test_queued_restore_yields_to_new_target_playback(world):
+def test_queued_restore_yields_to_new_target_playback(world, playback):
     event("a")
     release = threading.Event()
-    dispatcher._action_executor.submit(lambda: release.wait(timeout=10))
+    playback.queue.submit(lambda: release.wait(timeout=10))
     try:
         event("a", "media.stop", wait=False)
         event("b", wait=False)

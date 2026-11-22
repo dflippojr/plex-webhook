@@ -50,11 +50,11 @@ def assert_identical(record, target, request, targets):
     assert json.dumps(record) == json.dumps(expected(record, target, request, targets))
 
 
-def test_playback_dim_and_restore_records(world):
+def test_playback_dim_and_restore_records(world, playback):
     context, records = world
-    dispatcher.handle_event(payload("media.play", "a"), context)
+    playback.handle_event(payload("media.play", "a"), context)
     drain()
-    dispatcher.handle_event(payload("media.stop", "a"), context)
+    playback.handle_event(payload("media.stop", "a"), context)
     drain()
     dim, restore = queued(records, "a")
     assert_identical(dim, "a", "dim", [{"brand": "govee", "id": "a2", "brightness": 25},
@@ -63,11 +63,11 @@ def test_playback_dim_and_restore_records(world):
                                                {"brand": "tuya", "id": "a1", "brightness": None}])
 
 
-def test_automation_dim_at_level_and_restore_records(world):
+def test_automation_dim_at_level_and_restore_records(world, playback):
     context, records = world
-    dispatcher.handle_event(payload("media.play", "a"), context)
+    playback.handle_event(payload("media.play", "a"), context)
     drain()
-    dispatcher.handle_event(payload("media.stop", "a"), context)
+    playback.handle_event(payload("media.stop", "a"), context)
     drain()
     dim, restore = queued(records, "b")
     assert_identical(dim, "b", "dim", [{"brand": "tuya", "id": "b2", "brightness": 40},
@@ -76,23 +76,23 @@ def test_automation_dim_at_level_and_restore_records(world):
                                                {"brand": "govee", "id": "b1", "brightness": None}])
 
 
-def test_queued_record_precedes_the_action_it_announces(world):
+def test_queued_record_precedes_the_action_it_announces(world, playback):
     context, records = world
-    dispatcher.handle_event(payload("media.play", "a"), context)
+    playback.handle_event(payload("media.play", "a"), context)
     drain()
     names = [(record["action"], record["target_id"]) for record in records]
     assert names.index(("light.action_queued", "a")) < names.index(("light.decision", "a2"))
     assert names.index(("light.action_queued", "b")) < names.index(("light.decision", "b2"))
 
 
-def test_snapshot_failure_records_no_queued_action_and_reports_dispatcher_error(world, monkeypatch):
+def test_snapshot_failure_records_no_queued_action_and_reports_dispatcher_error(world, monkeypatch, playback):
     context, records = world
 
     def boom(room_key):
         raise RuntimeError("synthetic")
 
-    monkeypatch.setattr(dispatcher.registry, "lights_for", boom)
-    dispatcher._dispatch("a", "dim", context).result(timeout=30)
+    monkeypatch.setattr(playback.registry, "lights_for", boom)
+    playback.dispatch("a", "dim", context).result(timeout=30)
     assert [(record["action"], record["outcome"], record["reason_code"]) for record in records] == [
         ("light.action_summary", "failed", "dispatcher_error")]
     assert records[0]["detail"]["request"] == "dim"
