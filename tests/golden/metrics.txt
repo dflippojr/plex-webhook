@@ -1,0 +1,139 @@
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total <volatile>
+python_gc_objects_collected_total <volatile>
+python_gc_objects_collected_total <volatile>
+# HELP python_gc_objects_uncollectable_total Uncollectable objects found during GC
+# TYPE python_gc_objects_uncollectable_total counter
+python_gc_objects_uncollectable_total <volatile>
+python_gc_objects_uncollectable_total <volatile>
+python_gc_objects_uncollectable_total <volatile>
+# HELP python_gc_collections_total Number of times this generation was collected
+# TYPE python_gc_collections_total counter
+python_gc_collections_total <volatile>
+python_gc_collections_total <volatile>
+python_gc_collections_total <volatile>
+# HELP python_info Python platform information
+# TYPE python_info gauge
+python_info <volatile>
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes <volatile>
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes <volatile>
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds <volatile>
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total <volatile>
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds <volatile>
+# HELP process_max_fds Maximum number of open file descriptors.
+# TYPE process_max_fds gauge
+process_max_fds <volatile>
+# HELP plex_dispatcher_room_active_sessions Number of Plex clients currently playing in a room
+# TYPE plex_dispatcher_room_active_sessions gauge
+plex_dispatcher_room_active_sessions{room="den"} 0.0
+plex_dispatcher_room_active_sessions{room="attic"} 0.0
+# HELP plex_dispatcher_actions_total Total light actions dispatched
+# TYPE plex_dispatcher_actions_total counter
+plex_dispatcher_actions_total{action="dim",room="den"} 2.0
+plex_dispatcher_actions_total{action="dim",room="attic"} 3.0
+plex_dispatcher_actions_total{action="restore",room="den"} 2.0
+plex_dispatcher_actions_total{action="restore",room="attic"} 4.0
+# HELP plex_dispatcher_actions_created Total light actions dispatched
+# TYPE plex_dispatcher_actions_created gauge
+plex_dispatcher_actions_created{action="dim",room="den"} <created>
+plex_dispatcher_actions_created{action="dim",room="attic"} <created>
+plex_dispatcher_actions_created{action="restore",room="den"} <created>
+plex_dispatcher_actions_created{action="restore",room="attic"} <created>
+# HELP plex_dispatcher_expired_players_total Players dropped from a room's active state after a play with no matching pause/stop went stale
+# TYPE plex_dispatcher_expired_players_total counter
+# HELP plex_dispatcher_light_decisions_total Per-light brightness decisions taken when dimming and restoring
+# TYPE plex_dispatcher_light_decisions_total counter
+plex_dispatcher_light_decisions_total{decision="dim_recorded",room="den"} 2.0
+plex_dispatcher_light_decisions_total{decision="dim_recorded",room="attic"} 2.0
+plex_dispatcher_light_decisions_total{decision="restore_without_read",room="den"} 2.0
+plex_dispatcher_light_decisions_total{decision="restore_without_read",room="attic"} 2.0
+plex_dispatcher_light_decisions_total{decision="dim_kept_original",room="attic"} 1.0
+# HELP plex_dispatcher_light_decisions_created Per-light brightness decisions taken when dimming and restoring
+# TYPE plex_dispatcher_light_decisions_created gauge
+plex_dispatcher_light_decisions_created{decision="dim_recorded",room="den"} <created>
+plex_dispatcher_light_decisions_created{decision="dim_recorded",room="attic"} <created>
+plex_dispatcher_light_decisions_created{decision="restore_without_read",room="den"} <created>
+plex_dispatcher_light_decisions_created{decision="restore_without_read",room="attic"} <created>
+plex_dispatcher_light_decisions_created{decision="dim_kept_original",room="attic"} <created>
+# HELP plex_dispatcher_actions_dropped_total Queued light actions dropped before they started
+# TYPE plex_dispatcher_actions_dropped_total counter
+# HELP plex_dispatcher_light_results_total Per-light results by transport and outcome: transport evidence, never observed bulb state
+# TYPE plex_dispatcher_light_results_total counter
+plex_dispatcher_light_results_total{brand="other",outcome="skipped",room="den",transport="none"} 4.0
+plex_dispatcher_light_results_total{brand="other",outcome="skipped",room="attic",transport="none"} 7.0
+# HELP plex_dispatcher_light_results_created Per-light results by transport and outcome: transport evidence, never observed bulb state
+# TYPE plex_dispatcher_light_results_created gauge
+plex_dispatcher_light_results_created{brand="other",outcome="skipped",room="den",transport="none"} <created>
+plex_dispatcher_light_results_created{brand="other",outcome="skipped",room="attic",transport="none"} <created>
+# HELP plex_webhook_events_total Total Plex webhook events received
+# TYPE plex_webhook_events_total counter
+plex_webhook_events_total{account="known",event="media.play",player="Den TV"} 1.0
+plex_webhook_events_total{account="known",event="media.pause",player="Den TV"} 1.0
+plex_webhook_events_total{account="known",event="media.resume",player="Den TV"} 1.0
+plex_webhook_events_total{account="known",event="media.play",player="Attic TV"} 1.0
+plex_webhook_events_total{account="known",event="media.stop",player="Attic TV"} 1.0
+plex_webhook_events_total{account="known",event="media.stop",player="Den TV"} 1.0
+plex_webhook_events_total{account="known",event="media.scrobble",player="other"} 1.0
+plex_webhook_events_total{account="known",event="other",player="Den TV"} 1.0
+plex_webhook_events_total{account="other",event="unknown",player="unknown"} 1.0
+# HELP plex_webhook_events_created Total Plex webhook events received
+# TYPE plex_webhook_events_created gauge
+plex_webhook_events_created{account="known",event="media.play",player="Den TV"} <created>
+plex_webhook_events_created{account="known",event="media.pause",player="Den TV"} <created>
+plex_webhook_events_created{account="known",event="media.resume",player="Den TV"} <created>
+plex_webhook_events_created{account="known",event="media.play",player="Attic TV"} <created>
+plex_webhook_events_created{account="known",event="media.stop",player="Attic TV"} <created>
+plex_webhook_events_created{account="known",event="media.stop",player="Den TV"} <created>
+plex_webhook_events_created{account="known",event="media.scrobble",player="other"} <created>
+plex_webhook_events_created{account="known",event="other",player="Den TV"} <created>
+plex_webhook_events_created{account="other",event="unknown",player="unknown"} <created>
+# HELP plex_webhook_last_event_timestamp_seconds Unix timestamp of the last received Plex webhook event
+# TYPE plex_webhook_last_event_timestamp_seconds gauge
+plex_webhook_last_event_timestamp_seconds <volatile>
+# HELP plex_webhook_audit_write_failures_total Audit records lost to write failures
+# TYPE plex_webhook_audit_write_failures_total counter
+plex_webhook_audit_write_failures_total 0.0
+# HELP plex_webhook_audit_write_failures_created Audit records lost to write failures
+# TYPE plex_webhook_audit_write_failures_created gauge
+plex_webhook_audit_write_failures_created <created>
+# HELP plex_webhook_rejected_requests_total Webhook requests rejected before storage
+# TYPE plex_webhook_rejected_requests_total counter
+plex_webhook_rejected_requests_total{reason="body_too_large"} 1.0
+plex_webhook_rejected_requests_total{reason="too_many_fields"} 0.0
+plex_webhook_rejected_requests_total{reason="too_many_files"} 0.0
+plex_webhook_rejected_requests_total{reason="field_too_large"} 0.0
+plex_webhook_rejected_requests_total{reason="invalid_token"} 0.0
+# HELP plex_webhook_rejected_requests_created Webhook requests rejected before storage
+# TYPE plex_webhook_rejected_requests_created gauge
+plex_webhook_rejected_requests_created{reason="body_too_large"} <created>
+plex_webhook_rejected_requests_created{reason="too_many_fields"} <created>
+plex_webhook_rejected_requests_created{reason="too_many_files"} <created>
+plex_webhook_rejected_requests_created{reason="field_too_large"} <created>
+plex_webhook_rejected_requests_created{reason="invalid_token"} <created>
+# HELP plex_webhook_unlisted_server_events_total Webhook events stored but not dispatched: Server.uuid not allowed
+# TYPE plex_webhook_unlisted_server_events_total counter
+plex_webhook_unlisted_server_events_total 0.0
+# HELP plex_webhook_unlisted_server_events_created Webhook events stored but not dispatched: Server.uuid not allowed
+# TYPE plex_webhook_unlisted_server_events_created gauge
+plex_webhook_unlisted_server_events_created <created>
+# HELP plex_webhook_admin_denials_total Denied admin requests
+# TYPE plex_webhook_admin_denials_total counter
+plex_webhook_admin_denials_total{reason="auth_unconfigured"} 0.0
+plex_webhook_admin_denials_total{reason="missing_credential"} 1.0
+plex_webhook_admin_denials_total{reason="invalid_credential"} 1.0
+# HELP plex_webhook_admin_denials_created Denied admin requests
+# TYPE plex_webhook_admin_denials_created gauge
+plex_webhook_admin_denials_created{reason="auth_unconfigured"} <created>
+plex_webhook_admin_denials_created{reason="missing_credential"} <created>
+plex_webhook_admin_denials_created{reason="invalid_credential"} <created>
