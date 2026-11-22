@@ -113,3 +113,50 @@ def test_shutdown_audits_actions_that_never_ran_and_leaves_the_running_one_incom
             break
         threading.Event().wait(0.01)
     assert finished in _summaries(settings.db_path)
+
+
+MANY_ROOMS = "rooms:\n" + "".join(
+    f"  room_{n}:\n    plex_clients:\n      - {{title: Synthetic TV {n}}}\n    lights:\n      - {{brand: govee, id: l{n}}}\n"
+    for n in range(12))
+
+
+def test_shutdown_audits_dropped_actions_within_its_deadline_under_lock_contention(rooms_file, make_service,
+                                                                                    monkeypatch, caplog):
+    """Terminal records for dropped actions share the one shutdown deadline; what is left is logged by count."""
+    import sqlite3
+    import time
+
+    from app import audit
+
+    rooms_file.write_text(MANY_ROOMS, encoding="utf-8")
+    monkeypatch.setattr(service_module, "SHUTDOWN_DRAIN_SECONDS", 0.5)
+    release, started = threading.Event(), threading.Event()
+
+    def held(action, room_lights, brightness=None, turn_on=True):
+        started.set()
+        release.wait(timeout=30)
+        return [accepted_result(light) for light in room_lights]
+
+    monkeypatch.setattr(lights, "apply_action", held)
+    monkeypatch.setattr(lights, "read_state", lambda light, timeout=None: lights.StateReading.failed())
+    monkeypatch.setattr(lights, "prepare", lambda room_lights: None)
+    service = make_service()
+    for n in range(12):
+        context = service.light_audit_context(audit.correlation_id(), None)
+        service.playback.handle_event(payload("media.play", f"Synthetic TV {n}"), context)
+        if n == 0:
+            assert started.wait(timeout=5)  # room_0's dim holds the worker; the rest stay queued
+    locker = sqlite3.connect(service.settings.db_path, timeout=0)
+    locker.execute("BEGIN IMMEDIATE")  # another writer holds the lock for the whole shutdown
+    try:
+        start = time.monotonic()
+        service.stop()
+        elapsed = time.monotonic() - start
+    finally:
+        locker.rollback()
+        locker.close()
+        release.set()
+    # One deadline for draining and records; at most one record's 0.25 s lock wait past it.
+    assert elapsed < 0.5 + 0.25 + 0.3, elapsed
+    unaudited = [r.getMessage() for r in caplog.records if "reason=shutdown_drops_unaudited" in r.getMessage()]
+    assert len(unaudited) == 1

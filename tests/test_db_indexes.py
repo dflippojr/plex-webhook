@@ -189,3 +189,12 @@ def test_expression_index_from_earlier_releases_is_replaced(tmp_path):
         assert "idx_events_player_labels_cover" in indexes
     finally:
         conn.close()
+
+
+def test_benchmark_runs_end_to_end_with_tiny_numbers(tmp_path):
+    from scripts.benchmark_sqlite_indexes import benchmark
+
+    result = benchmark(tmp_path, 3, 2)
+    assert result["events"] == 3 and result["first_open_ms"] >= 0 and result["second_open_ms"] >= 0
+    assert set(result["reads"]) == set(QUERIES)
+    assert result["writes"]["indexed"]["journal_mode"] == "wal" and result["writes"]["indexed"]["commits"] == 2

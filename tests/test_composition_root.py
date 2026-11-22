@@ -86,3 +86,64 @@ def test_stopping_a_service_twice_is_harmless(make_service):
     service.stop()
     service.stop()
     assert service.conn is None
+
+
+def _record_opened(monkeypatch):
+    from app import service as service_module
+
+    opened, real = [], service_module.storage.open_database
+    monkeypatch.setattr(service_module.storage, "open_database", lambda path: opened.append(real(path)) or opened[-1])
+    return opened
+
+
+def _fail_seeding(monkeypatch):
+    from app.service import Service
+
+    def boom(self):
+        raise RuntimeError("synthetic seeding failure")
+
+    monkeypatch.setattr(Service, "_seed_counters", boom)
+
+
+def test_a_startup_failure_after_the_store_opens_closes_it(settings, monkeypatch):
+    from app.service import Service
+
+    opened = _record_opened(monkeypatch)
+    _fail_seeding(monkeypatch)
+    service = Service(settings)
+    try:
+        service.start()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("startup should have failed")
+    assert service.conn is None
+    try:
+        opened[0].execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        pass
+    else:
+        raise AssertionError("the startup connection is still open")
+
+
+def test_a_failed_app_startup_closes_the_store(settings, monkeypatch):
+    """The lifespan's service is checked directly: its connection belongs to the app thread."""
+    from app.service import Service
+
+    _fail_seeding(monkeypatch)
+    started, real_start = [], Service.start
+
+    def recording_start(self):
+        started.append(self)
+        return real_start(self)
+
+    monkeypatch.setattr(Service, "start", recording_start)
+    app = create_app(settings)
+    try:
+        with TestClient(app):
+            pass
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("startup should have failed")
+    assert len(started) == 1 and started[0].conn is None
