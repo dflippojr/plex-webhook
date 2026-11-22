@@ -98,8 +98,8 @@ anything else is skipped as `invalid_entity_id`).
 
 1. In Home Assistant, open your user profile, go to the **Security** tab and
    under **Long-lived access tokens** choose **Create token**. Copy it once;
-   Home Assistant will not show it again. A dedicated non-admin user for this
-   service limits what the token can do.
+   Home Assistant will not show it again. The token acts with all of that
+   user's rights, so consider a dedicated Home Assistant user for this service.
 2. In `.env`, set `HASS_URL` to the hub's base URL (`http://` or `https://`,
    host and port, no query or fragment) and `HASS_TOKEN` to the token.
 3. The container must be able to reach that URL. `localhost` inside the
