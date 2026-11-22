@@ -1,7 +1,7 @@
 """Service settings, read from the environment once, when the app is created.
 
 ADMIN_API_TOKEN and the device keys (GOVEE_API_KEY, TUYA_ACCESS_ID,
-TUYA_ACCESS_KEY) are not here: they are read where they are used, so rotating
+TUYA_ACCESS_KEY, HASS_URL, HASS_TOKEN) are not here: they are read where they are used, so rotating
 them needs no restart. Reading settings opens no file.
 """
 import os

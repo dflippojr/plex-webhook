@@ -23,7 +23,7 @@ logger = logging.getLogger("plex-webhook")
 ACTIVATE_EVENTS = {"media.play", "media.resume"}
 DEACTIVATE_EVENTS = {"media.pause", "media.stop"}
 
-METRIC_BRANDS = {"govee", "tuya"}
+METRIC_BRANDS = {"govee", "tuya", "hass"}
 LIGHT_OUTCOMES = set(audit.OPERATIONS["light.result"][3])
 
 # A light further than this many percentage points from the dim level was changed by hand.

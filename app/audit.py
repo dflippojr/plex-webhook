@@ -27,6 +27,7 @@ ACTOR_VERIFIED = {"admin_token": 1}
 LIGHT_FAILURE_REASONS = {
     "unsupported_brand", "missing_credentials", "missing_model", "no_address", "library_unavailable",
     "send_error", "request_failed", "tuya_rejected", "unexpected_error",
+    "hub_rejected", "invalid_entity_id", "brightness_only_unsupported",
     "light_off", "manual_change", "no_record",
 }
 # Per-light brightness decisions: outcome is the decision, reason the evidence behind it.
@@ -70,7 +71,7 @@ OPERATIONS = {
     "light.action_queued": ("dispatcher", "system", "room", {"queued": {"accepted"}}),
     "light.result": ("dispatcher", "system", "light", {
         "command_sent": {"lan_command_sent"},
-        "request_accepted_by_transport": {"local_accepted", "cloud_accepted"},
+        "request_accepted_by_transport": {"local_accepted", "cloud_accepted", "hub_accepted"},
         "unconfirmed": {"result_unconfirmed"},
         "failed": LIGHT_FAILURE_REASONS,
         "skipped": LIGHT_FAILURE_REASONS,
@@ -85,7 +86,7 @@ OPERATIONS = {
     }),
 }
 LIGHT_REQUESTS = {"dim", "restore"}
-LIGHT_TRANSPORTS = {"lan", "local", "cloud", "none"}
+LIGHT_TRANSPORTS = {"lan", "local", "cloud", "hub", "none"}
 LIGHT_CREDENTIAL_SOURCES = {"none", "environment", "device_config"}
 LIGHT_STEPS = ("turn", "brightness")
 LABEL_LIMIT = 128

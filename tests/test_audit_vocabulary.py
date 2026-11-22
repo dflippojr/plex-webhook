@@ -3,9 +3,9 @@ from app import audit, audit_cli, auth
 
 DENIED = ["auth_unconfigured", "invalid_credential", "missing_credential"]
 CONFIG_REJECTED = ["config_unavailable", "invalid_config"]
-LIGHT_FAILURES = ["library_unavailable", "light_off", "manual_change", "missing_credentials", "missing_model",
-                  "no_address", "no_record", "request_failed", "send_error", "tuya_rejected", "unexpected_error",
-                  "unsupported_brand"]
+LIGHT_FAILURES = ["brightness_only_unsupported", "hub_rejected", "invalid_entity_id", "library_unavailable",
+                  "light_off", "manual_change", "missing_credentials", "missing_model", "no_address", "no_record",
+                  "request_failed", "send_error", "tuya_rejected", "unexpected_error", "unsupported_brand"]
 
 OPERATIONS = {
     "clients.read": ("http", "anonymous", "clients", {"denied": DENIED}),
@@ -24,7 +24,7 @@ OPERATIONS = {
     }),
     "light.result": ("dispatcher", "system", "light", {
         "command_sent": ["lan_command_sent"], "failed": LIGHT_FAILURES,
-        "request_accepted_by_transport": ["cloud_accepted", "local_accepted"], "skipped": LIGHT_FAILURES,
+        "request_accepted_by_transport": ["cloud_accepted", "hub_accepted", "local_accepted"], "skipped": LIGHT_FAILURES,
         "unconfirmed": ["result_unconfirmed"],
     }),
     "lights.check": ("http", "anonymous", "room", {

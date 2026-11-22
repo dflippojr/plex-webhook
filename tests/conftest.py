@@ -12,7 +12,7 @@ import sqlite3
 import pytest
 
 # Device credentials are read where they are used; none may leak in from the host.
-for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "WEBHOOK_TOKEN"):
+for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "HASS_URL", "HASS_TOKEN", "WEBHOOK_TOKEN"):
     os.environ.pop(_name, None)
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
