@@ -292,21 +292,21 @@ def test_unavailable_room_endpoints(client, registry, playback, monkeypatch, end
     assert registry.rooms is before
 
 
-def test_invalid_startup_still_captures_webhook(settings, rooms_file, light_calls):
-    """A rooms file that is invalid when the app starts leaves empty mappings; capture still works."""
-    from fastapi.testclient import TestClient
-    from app.main import create_app
-
+@pytest.fixture
+def invalid_startup_rooms(rooms_file):
+    """Requested before ``client``, so the app starts with this invalid rooms file."""
     rooms_file.write_text("rooms: [private-value", encoding="utf-8")
-    app = create_app(settings)
-    with TestClient(app) as started:
-        service = app.state.service
-        assert service.registry.rooms == {}
-        assert (service.registry.load_outcome, service.registry.load_reason) == ("rejected", "invalid_config")
-        assert post(started, payload("media.play")).status_code == 200
-        with sqlite3.connect(settings.db_path) as conn:
-            assert conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
-        drain(service)
+    return rooms_file
+
+
+def test_invalid_startup_still_captures_webhook(invalid_startup_rooms, client, light_calls):
+    """A rooms file that is invalid when the app starts leaves empty mappings; capture still works."""
+    service = client.service
+    assert service.registry.rooms == {}
+    assert (service.registry.load_outcome, service.registry.load_reason) == ("rejected", "invalid_config")
+    assert post(client, payload("media.play")).status_code == 200
+    assert client.conn.execute("SELECT event FROM events").fetchall() == [("media.play",)]
+    drain(service)
     assert light_calls == []
 
 
