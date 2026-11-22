@@ -160,3 +160,51 @@ def test_shutdown_audits_dropped_actions_within_its_deadline_under_lock_contenti
     assert elapsed < 0.5 + 0.25 + 0.3, elapsed
     unaudited = [r.getMessage() for r in caplog.records if "reason=shutdown_drops_unaudited" in r.getMessage()]
     assert len(unaudited) == 1
+
+
+def test_shutdown_bound_holds_while_the_worker_is_stuck_in_a_restore_record_write(rooms_file, make_service,
+                                                                                    monkeypatch, caplog):
+    """r2: the real worker holds WRITE_LOCK in a restore-record write that waits on another writer's lock.
+
+    The dropped action's summary needs the same lock; it must give up at the shutdown deadline.
+    """
+    import sqlite3
+    import time
+
+    from app import audit
+
+    rooms_file.write_text(MANY_ROOMS, encoding="utf-8")
+    monkeypatch.setattr(service_module, "SHUTDOWN_DRAIN_SECONDS", 1.0)
+    monkeypatch.setattr(service_module, "SHUTDOWN_RECORD_SECONDS", 0.5)
+    reading, read_started = threading.Event(), threading.Event()
+
+    def held_read(light, timeout=None):
+        read_started.set()
+        reading.wait(timeout=30)
+        return lights.StateReading(True, True, 80, "lan")
+
+    monkeypatch.setattr(lights, "read_state", held_read)
+    monkeypatch.setattr(lights, "prepare", lambda room_lights: None)
+    monkeypatch.setattr(lights, "apply_action",
+                        lambda action, room_lights, brightness=None, turn_on=True:
+                        [accepted_result(light) for light in room_lights])
+    service = make_service()
+    for n in range(2):
+        context = service.light_audit_context(audit.correlation_id(), None)
+        service.playback.handle_event(payload("media.play", f"Synthetic TV {n}"), context)
+        if n == 0:
+            assert read_started.wait(timeout=5)  # room_0's dim waits in its state read
+    locker = sqlite3.connect(service.settings.db_path, timeout=0)
+    locker.execute("BEGIN IMMEDIATE")  # the dim's restore-record write will wait on this, holding WRITE_LOCK
+    threading.Timer(0.1, reading.set).start()
+    try:
+        start = time.monotonic()
+        service.stop()
+        elapsed = time.monotonic() - start
+    finally:
+        reading.set()
+        locker.rollback()
+        locker.close()
+    assert elapsed < 1.0 + 0.3, elapsed
+    unaudited = [r.getMessage() for r in caplog.records if "reason=shutdown_drops_unaudited" in r.getMessage()]
+    assert unaudited == ["reason=shutdown_drops_unaudited count=1"]
