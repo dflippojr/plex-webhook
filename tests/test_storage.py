@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app import audit, audit_cli, db
+from app import audit, audit_cli, db, storage
 from conftest import payload, records
 
 REPO = Path(__file__).resolve().parent.parent
@@ -100,11 +100,10 @@ def receipt(path, **kwargs):
 
 
 @pytest.fixture
-def started(tmp_path, monkeypatch):
+def started(tmp_path):
     """A database opened the way service startup opens it, with the service connection kept open."""
     path = tmp_path / "data" / "plex_events.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    conn = db.get_connection()
+    conn = storage.open_database(path)
     yield path, conn
     conn.close()
 
@@ -120,7 +119,7 @@ def test_partly_read_cli_cursor_does_not_block_audit_or_event_writes(started):
 
         audit_id = receipt(path)
         event_id = db.insert_event(service, audit.utc_now(), "media.play", payload("media.play"), "{}")
-        writer = db.get_connection()
+        writer = storage.open_database(path)
         try:
             second_event_id = db.insert_event(writer, audit.utc_now(), "media.stop", payload("media.stop"), "{}")
         finally:
@@ -167,19 +166,17 @@ def _columns(conn, table):
 
 
 @pytest.mark.parametrize("schema", [MASTER_SCHEMA, OLD_SCHEMA], ids=["master", "before-later-columns"])
-def test_master_database_upgrades_to_latest_version_with_rows_intact(tmp_path, monkeypatch, schema):
-    from app import storage
-
+def test_master_database_upgrades_to_latest_version_with_rows_intact(tmp_path, schema):
     path = tmp_path / "legacy.db"
+    restore_records = db.RestoreRecords(path)
     _legacy_database(path, schema)
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone() == (0,)
         before = _snapshot(conn)
     conn.close()
 
-    monkeypatch.setattr(db, "DB_PATH", path)
     for _ in range(2):  # a second startup finds nothing left to do
-        conn = db.get_connection()
+        conn = storage.open_database(path)
         try:
             assert conn.execute("PRAGMA user_version").fetchone() == (len(storage.MIGRATIONS),)
             assert _snapshot(conn) == before
@@ -197,12 +194,13 @@ def test_master_database_upgrades_to_latest_version_with_rows_intact(tmp_path, m
     exported = records(path)
     assert len(exported) == 1 and exported[0]["checksum"] == audit.checksum(exported[0])
     assert "detail" not in exported[0]
-    assert db.get_restore_record("room_a", "light-1") == {"was_off": False, "restore_percent": 80, "dim_percent": 20}
-    assert db.automation_owner("room_b") == "room_a"
+    assert restore_records.get_restore_record("room_a", "light-1") == {"was_off": False, "restore_percent": 80, "dim_percent": 20}
+    assert restore_records.automation_owner("room_b") == "room_a"
 
 
 def test_append_and_restore_helpers_run_no_ddl(started, monkeypatch):
     path, _ = started
+    restore_records = db.RestoreRecords(path)
     statements = []
     connect = sqlite3.connect
 
@@ -213,25 +211,25 @@ def test_append_and_restore_helpers_run_no_ddl(started, monkeypatch):
 
     monkeypatch.setattr(sqlite3, "connect", traced)
     receipt(path)
-    db.put_restore_record("room_a", "light-1", False, 80, 20)
-    assert db.get_restore_record("room_a", "light-1")["dim_percent"] == 20
-    assert db.rooms_with_restore_records() == {"room_a"}
-    db.delete_restore_record("room_a", "light-1")
-    db.set_automation_owner("room_b", "room_a")
-    assert db.automation_owner("room_b") == "room_a"
-    assert db.automation_targets("room_a") == {"room_b"}
-    assert db.automation_sources() == {"room_a"}
-    db.set_automation_owner("room_b", None)
+    restore_records.put_restore_record("room_a", "light-1", False, 80, 20)
+    assert restore_records.get_restore_record("room_a", "light-1")["dim_percent"] == 20
+    assert restore_records.rooms_with_restore_records() == {"room_a"}
+    restore_records.delete_restore_record("room_a", "light-1")
+    restore_records.set_automation_owner("room_b", "room_a")
+    assert restore_records.automation_owner("room_b") == "room_a"
+    assert restore_records.automation_targets("room_a") == {"room_b"}
+    assert restore_records.automation_sources() == {"room_a"}
+    restore_records.set_automation_owner("room_b", None)
 
     assert any("INSERT INTO audit_events" in statement for statement in statements)
     assert any("light_restore_records" in statement for statement in statements)
     assert [statement for statement in statements if DDL.search(statement)] == []
 
 
-def test_journal_mode_is_wal_after_startup():
-    import app.main  # noqa: F401  (startup opens DB_PATH)
+def test_journal_mode_is_wal_after_startup(make_service, settings):
+    make_service()
 
-    with sqlite3.connect(os.environ["DB_PATH"]) as conn:
+    with sqlite3.connect(settings.db_path) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     conn.close()
 
@@ -366,13 +364,11 @@ def _pragmas(conn):
 
 
 def test_sync_stays_full_unless_the_file_is_in_wal_on_startup_and_later_connections(tmp_path, monkeypatch):
-    from app import storage
-
     path = tmp_path / "data" / "plex_events.db"
+    restore_records = db.RestoreRecords(path)
     path.parent.mkdir()
     _legacy_database(path, MASTER_SCHEMA)
     monkeypatch.setattr(storage, "BUSY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(db, "DB_PATH", path)
     later = []
     connect = storage.connect
 
@@ -386,12 +382,12 @@ def test_sync_stays_full_unless_the_file_is_in_wal_on_startup_and_later_connecti
         with monkeypatch.context() as patch:
             patch.setattr(storage, "connect", recording_connect)
             receipt(path)  # the audit append's own connection
-            assert db.get_restore_record("room_a", "light-1") is not None  # the restore helper's connection
+            assert restore_records.get_restore_record("room_a", "light-1") is not None  # the restore helper's connection
         return later
 
     reader = _hold_read_lock(path)
     try:
-        service = db.get_connection()  # the reader keeps the file in rollback-journal mode
+        service = storage.open_database(path)  # the reader keeps the file in rollback-journal mode
     finally:
         reader.close()
     try:
@@ -401,7 +397,7 @@ def test_sync_stays_full_unless_the_file_is_in_wal_on_startup_and_later_connecti
     finally:
         service.close()
 
-    service = db.get_connection()  # the next start switches to WAL, where NORMAL (1) is safe
+    service = storage.open_database(path)  # the next start switches to WAL, where NORMAL (1) is safe
     try:
         assert _pragmas(service) == ("wal", 1)
         assert open_later_connections() == [("wal", 1), ("wal", 1)]

@@ -7,7 +7,6 @@ import types
 
 import pytest
 import requests
-from prometheus_client import REGISTRY
 
 from app import audit, db, dispatcher, lights
 from app.rooms import RoomConfigError, RoomRegistry
@@ -61,7 +60,7 @@ class FakeController:
 
 
 @pytest.fixture
-def world(tmp_path, rooms_file, registry, monkeypatch):
+def world(tmp_path, rooms_file, registry, monkeypatch, playback):
     rooms_file.write_text(YAML, encoding="utf-8")
     registry.reload()
     fake = FakeController()
@@ -74,11 +73,11 @@ def world(tmp_path, rooms_file, registry, monkeypatch):
     world = types.SimpleNamespace(fake=fake, path=path, context=context)
 
     def play():
-        dispatcher.handle_event(payload("media.play", "Den TV"), context)
+        playback.handle_event(payload("media.play", "Den TV"), context)
         drain()
 
     def stop():
-        dispatcher.handle_event(payload("media.stop", "Den TV"), context)
+        playback.handle_event(payload("media.stop", "Den TV"), context)
         drain()
 
     def decisions():
@@ -97,7 +96,7 @@ def world(tmp_path, rooms_file, registry, monkeypatch):
     return world
 
 
-def test_on_light_dims_then_restores_its_own_read_value(world):
+def test_on_light_dims_then_restores_its_own_read_value(world, restore_records):
     world.fake.state = {"g1": on(60), "t1": on(35)}
     world.play()
     assert world.fake.commands == [("dim", "g1", 30), ("dim", "t1", 30)]
@@ -105,7 +104,7 @@ def test_on_light_dims_then_restores_its_own_read_value(world):
     world.stop()
     assert world.fake.commands == [("restore", "g1", 60), ("restore", "t1", 35)]
     assert [(t, o) for t, o, _, _ in world.decisions() if o == "restored"] == [("g1", "restored"), ("t1", "restored")]
-    assert db.rooms_with_restore_records() == set()
+    assert restore_records.rooms_with_restore_records() == set()
 
 
 def test_off_light_is_never_turned_on(world):
@@ -131,26 +130,26 @@ def test_manual_change_threshold_is_five_points_from_the_dim_level(world, hand, 
     assert world.fake.commands == ([("restore", "g1", 70)] if expected == "restored" else [])
 
 
-def test_restore_failing_mid_loop_keeps_every_record_and_sends_nothing(world, registry, monkeypatch):
+def test_restore_failing_mid_loop_keeps_every_record_and_sends_nothing(world, registry, monkeypatch, restore_records, playback):
     world.fake.state = {"g1": on(80), "t1": on(70)}
     world.play()
     world.fake.commands.clear()
-    real = db.get_restore_record
+    real = restore_records.get_restore_record
 
     def locked(room, light_id):  # an external writer holding the database lock past the busy timeout
         if light_id == "t1":
             raise sqlite3.OperationalError("database is locked")
         return real(room, light_id)
 
-    monkeypatch.setattr(dispatcher.db, "get_restore_record", locked)
+    monkeypatch.setattr(restore_records, "get_restore_record", locked)
     world.stop()
     assert world.fake.commands == []
     assert real(ROOM, "g1")["restore_percent"] == 80
     assert real(ROOM, "t1")["restore_percent"] == 70
-    monkeypatch.setattr(dispatcher.db, "get_restore_record", real)
-    dispatcher._apply(ROOM, "restore", None, world.context, None, registry.settings_for(ROOM))  # the retry
+    monkeypatch.setattr(restore_records, "get_restore_record", real)
+    playback.apply(ROOM, "restore", None, world.context, None, registry.settings_for(ROOM))  # the retry
     assert world.fake.commands == [("restore", "g1", 80), ("restore", "t1", 70)]
-    assert db.rooms_with_restore_records() == set()
+    assert restore_records.rooms_with_restore_records() == set()
 
 
 def test_light_turned_off_by_hand_is_skipped(world):
@@ -185,11 +184,11 @@ def test_read_failure_at_restore_time_still_restores(world):
     assert last[1:3] == ("restore_without_read", "read_failed")
 
 
-def test_redim_before_restore_keeps_the_original_value(world):
+def test_redim_before_restore_keeps_the_original_value(world, playback):
     world.fake.state = {"g1": on(65)}
     world.play()
     # No restore ran (for example a restart lost the player state); the light now reads 30.
-    dispatcher._active_clients.clear()
+    playback.active_clients.clear()
     world.play()
     world.fake.commands.clear()
     world.stop()
@@ -220,13 +219,13 @@ def test_summary_reports_all_and_some_unconfirmed(world, unconfirmed, reason, co
     assert summaries[0][3]["counts"] == counts
 
 
-def test_equal_dim_and_restore_levels_write_no_record(world, rooms_file, registry):
+def test_equal_dim_and_restore_levels_write_no_record(world, rooms_file, registry, restore_records):
     candidate(rooms_file, YAML.replace("restore_brightness_percent: 80", "restore_brightness_percent: 30"))
     registry.reload()
     world.fake.state = {"g1": on(30)}  # t1 reads off
     world.play()
     assert ("dim", "g1", 30) in world.fake.commands
-    assert db.get_restore_record(ROOM, "g1") is None
+    assert restore_records.get_restore_record(ROOM, "g1") is None
     assert [d[1:3] for d in world.decisions() if d[0] == "g1"] == [("dim_recorded", "at_dim_level")]
     # Pinned as today's behaviour: the decision says recorded although nothing was stored.
     world.fake.commands.clear()
@@ -236,14 +235,14 @@ def test_equal_dim_and_restore_levels_write_no_record(world, rooms_file, registr
     assert restored == [("g1", "skipped", "no_record")]
 
 
-def test_restart_between_dim_and_restore_still_restores(world):
+def test_restart_between_dim_and_restore_still_restores(world, playback):
     world.fake.state = {"g1": on(45), "t1": on(90)}
     world.play()
     # Restart: in-memory player state is gone, persisted records are not.
-    dispatcher._active_clients.clear()
-    dispatcher._pending_rooms.clear()
-    dispatcher._load_pending_rooms()
-    assert dispatcher._pending_rooms == {ROOM}
+    playback.active_clients.clear()
+    playback.pending_rooms.clear()
+    playback.load_pending_rooms()
+    assert playback.pending_rooms == {ROOM}
     world.fake.commands.clear()
     world.stop()
     assert world.fake.commands == [("restore", "g1", 45), ("restore", "t1", 90)]
@@ -254,8 +253,8 @@ def test_stop_without_dim_or_records_does_nothing(world):
     assert world.fake.commands == []
 
 
-def test_decisions_are_audited_with_levels_and_counted(world):
-    before = REGISTRY.get_sample_value("plex_dispatcher_light_decisions_total", {"room": ROOM, "decision": "restored"}) or 0
+def test_decisions_are_audited_with_levels_and_counted(world, playback):
+    before = playback.metrics.registry.get_sample_value("plex_dispatcher_light_decisions_total", {"room": ROOM, "decision": "restored"}) or 0
     world.fake.state = {"g1": on(60), "t1": on(35)}
     world.play()
     world.stop()
@@ -263,7 +262,7 @@ def test_decisions_are_audited_with_levels_and_counted(world):
     assert [d[0] for d in restored] == ["g1", "t1"]
     assert restored[0][3]["restore_percent"] == 60 and restored[0][3]["observed_percent"] == 30
     assert restored[0][3]["dim_percent"] == 30 and restored[0][3]["request"] == "restore"
-    after = REGISTRY.get_sample_value("plex_dispatcher_light_decisions_total", {"room": ROOM, "decision": "restored"})
+    after = playback.metrics.registry.get_sample_value("plex_dispatcher_light_decisions_total", {"room": ROOM, "decision": "restored"})
     assert after == before + 2
 
 
@@ -605,7 +604,7 @@ class OffPlug:
         return {"success": True}
 
 
-def test_unreadable_off_light_is_not_turned_on(rooms_file, registry, secrets, monkeypatch):
+def test_unreadable_off_light_is_not_turned_on(rooms_file, registry, secrets, monkeypatch, playback):
     rooms_file.write_text("rooms:\n  den:\n    plex_clients:\n      - title: Den TV\n"
                           "    lights:\n      - {brand: tuya, id: plug1}\n", encoding="utf-8")
     registry.reload()
@@ -614,11 +613,11 @@ def test_unreadable_off_light_is_not_turned_on(rooms_file, registry, secrets, mo
     fake.OutletDevice = OffPlug
     monkeypatch.setitem(sys.modules, "tinytuya", fake)
     OffPlug.on, OffPlug.raw, OffPlug.reads_fail, OffPlug.log = False, 500, True, []
-    dispatcher.handle_event(payload("media.play", "Den TV"))
+    playback.handle_event(payload("media.play", "Den TV"))
     drain()
     assert OffPlug.log == [("set_value", 3, 200)]
     OffPlug.reads_fail = False
-    dispatcher.handle_event(payload("media.stop", "Den TV"))
+    playback.handle_event(payload("media.stop", "Den TV"))
     drain()
     assert OffPlug.on is False
     assert "turn_on" not in OffPlug.log

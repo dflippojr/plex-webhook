@@ -13,7 +13,7 @@ import hmac
 import os
 import re
 
-from app.audit import DENIAL_REASONS  # re-exported: main.py pre-creates metric labels from it
+from app.audit import DENIAL_REASONS  # re-exported: app.metrics pre-creates metric labels from it
 
 MIN_TOKEN_LENGTH = 16
 MIN_WEBHOOK_TOKEN_LENGTH = 32
@@ -43,13 +43,12 @@ def denial_reason(authorization):
     return None
 
 
-def webhook_token_digest():
-    """Digest of the configured WEBHOOK_TOKEN, or None when it is unset or empty.
+def webhook_token_digest(configured):
+    """Digest of the configured WEBHOOK_TOKEN value, or None when it is unset or empty.
 
     Raises WebhookTokenError, so startup fails, for a value shorter than
     MIN_WEBHOOK_TOKEN_LENGTH or one that would need encoding in a URL path.
     """
-    configured = os.environ.get("WEBHOOK_TOKEN", "")
     if not configured:
         return None
     if len(configured) < MIN_WEBHOOK_TOKEN_LENGTH or not _URL_SAFE.fullmatch(configured):

@@ -197,17 +197,34 @@ items:
     body: |
       Stages 2 and 3 of #184. Stage 1 (the `LightController` Protocol and honest fakes) is built.
 
-      - Stage 2: delete the non-list result checks in `app/dispatcher.py` (`_dim`, `_restore`,
-        `_apply`) and `_attempt_of` in `app/lights.py`. Move any test that patches a transport
+      - Stage 2: delete the non-list result checks in `app/dispatcher.py` (`PlaybackState._dim`,
+        `_restore` and `apply`) and `_attempt_of` in `app/lights.py`. Move any test that patches a transport
         step to return a bool so it returns an `Attempt`.
       - Stage 3: delete `db.event_counts`, `GoveeController._discover_ip`,
-        `dispatcher._client_id` and `ActionQueue.pending`, and move their tests to the public
+        `dispatcher._client_id` and `ActionQueue.pending` (`app/action_queue.py`), and move their tests to the public
         paths that exercise the same behaviour (`labeled_event_counts`, `prepare` and
-        `_resolve`, `ActionQueue.submit` futures). Simplify `expire_idle_clients` to the
+        `_resolve`, `ActionQueue.submit` futures). Simplify `PlaybackState.expire_idle_clients` to the
         one-entry-per-room invariant, which removes the unreachable `if not active:` arc.
 
       Both stages delete tests, so they need the owner's `gate-change-approved` label. Check
       the coverage total against `fail_under` in `.coveragerc` first: deleting covered code can
       lower the percentage, so cover a miss before deleting.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: composition-root
+    kind: deferred
+    status: done
+    issue: 185
+    title: "Composition root: build the service in create_app/lifespan instead of at import time"
+    body: |
+      From the 2026-11-17 architecture review. Importing the app opened the database, read
+      the rooms file and started work, and every piece of runtime state was a module global.
+
+      Built in #185: `app/settings.py` reads the environment once, `app/metrics.py` binds the
+      collectors to one registry per service, `app/service.py` owns the store, rooms,
+      `PlaybackState` (`app/dispatcher.py`) and `ActionQueue` (`app/action_queue.py`), and
+      `create_app` in `app/main.py` builds it in the lifespan. Shutdown drains the queue for a
+      bounded time and closes the store. The light module's device caches stay module state.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.

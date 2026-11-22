@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from app import lights
+from app.settings import Settings
 
 GOVEE = {"brand": "govee", "id": "AA:BB", "name": "Lamp", "model": "H6159"}
 TUYA = {"brand": "tuya", "id": "plug1", "name": "Plug"}
@@ -76,9 +77,21 @@ def commands(fake):
 
 
 @pytest.mark.parametrize("value,expected", [("abc", 2.0), ("0", 2.0), ("31", 2.0), ("5", 5.0)])
-def test_read_timeout_env_falls_back_on_bad_values(monkeypatch, value, expected):
-    monkeypatch.setenv("LIGHT_READ_TIMEOUT_S", value)
-    assert lights._read_timeout() == expected
+def test_read_timeout_env_falls_back_on_bad_values(value, expected):
+    assert Settings.from_env({"LIGHT_READ_TIMEOUT_S": value}).light_read_timeout_s == expected
+
+
+def test_service_start_applies_the_light_settings(make_service, settings, tmp_path, monkeypatch):
+    """Startup hands the read timeout and secrets path to the light module, and drops cached secrets."""
+    import dataclasses
+
+    monkeypatch.setattr(lights, "STATE_READ_TIMEOUT_S", lights.STATE_READ_TIMEOUT_S)
+    monkeypatch.setattr(lights, "SECRETS_PATH", lights.SECRETS_PATH)
+    monkeypatch.setattr(lights, "_secrets_cache", {"stale": {}})
+    secrets = tmp_path / "other.secrets.yaml"
+    make_service(dataclasses.replace(settings, light_read_timeout_s=7.0, devices_secrets_path=secrets))
+    assert (lights.STATE_READ_TIMEOUT_S, lights.SECRETS_PATH) == (7.0, secrets)
+    assert lights._load_secrets() == {}
 
 
 # --- Govee ---------------------------------------------------------------------

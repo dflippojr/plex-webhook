@@ -1,9 +1,7 @@
 import pytest
-from prometheus_client import REGISTRY
 
-from app import dispatcher
 from app.rooms import RoomConfigError
-from conftest import ROOMS_YAML, drain, payload, post, rows
+from conftest import active_service, ROOMS_YAML, drain, payload, post, rows
 
 MOVIES_ONLY = ROOMS_YAML.replace("    name: Living Room\n",
                                  "    name: Living Room\n    dim_media_types: [movie, ' Episode ']\n")
@@ -23,7 +21,7 @@ def event(name, media_type="movie", title="Living Room TV", uuid=None):
         del body["Metadata"]["type"]
     else:
         body["Metadata"]["type"] = media_type
-    dispatcher.handle_event(body)
+    active_service().playback.handle_event(body)
     drain()
 
 
@@ -47,59 +45,59 @@ def test_listed_type_dims(movies_only, light_calls, media_type):
 
 @pytest.mark.parametrize("name", ["media.play", "media.resume"])
 @pytest.mark.parametrize("media_type", ["track", "photo", "clip", None, 42])
-def test_unlisted_type_is_ignored(movies_only, light_calls, name, media_type):
+def test_unlisted_type_is_ignored(movies_only, light_calls, name, media_type, playback):
     event(name, media_type)
     assert light_calls == []
-    assert dispatcher._active_clients == {}
-    assert dispatcher._pending_rooms == set()
-    assert dispatcher._action_executor.pending() == 0
+    assert playback.active_clients == {}
+    assert playback.pending_rooms == set()
+    assert playback.queue.pending() == 0
 
 
-def test_missing_metadata_is_ignored(movies_only, light_calls):
+def test_missing_metadata_is_ignored(movies_only, light_calls, playback):
     body = payload("media.play")
     del body["Metadata"]
-    dispatcher.handle_event(body)
+    playback.handle_event(body)
     drain()
     assert light_calls == []
 
 
 @pytest.mark.parametrize("stop_event", ["media.pause", "media.stop"])
 @pytest.mark.parametrize("media_type", ["movie", "track", None])
-def test_pause_or_stop_of_any_type_restores(movies_only, light_calls, stop_event, media_type):
+def test_pause_or_stop_of_any_type_restores(movies_only, light_calls, stop_event, media_type, playback):
     event("media.play", "movie")
     event(stop_event, media_type)
     assert [call[0] for call in light_calls][-1] == "restore"
     assert ("restore", ["AA:BB"]) in light_calls
-    assert dispatcher._active_clients["living_room"] == {}
+    assert playback.active_clients["living_room"] == {}
 
 
-def test_stop_for_ignored_play_is_harmless(movies_only, light_calls):
+def test_stop_for_ignored_play_is_harmless(movies_only, light_calls, playback):
     event("media.play", "track")
     event("media.stop", "track")
     assert light_calls == []
-    assert dispatcher._active_clients == {"living_room": {}}
+    assert playback.active_clients == {"living_room": {}}
 
 
-def test_film_then_music_ends_restored(movies_only, light_calls):
+def test_film_then_music_ends_restored(movies_only, light_calls, playback):
     event("media.play", "movie")
     event("media.stop", "movie")
     event("media.play", "track")
     assert light_calls == [("dim", ["AA:BB"]), ("dim", ["plug1"]), ("restore", ["AA:BB"]), ("restore", ["plug1"])]
-    assert dispatcher._active_clients == {"living_room": {}}
+    assert playback.active_clients == {"living_room": {}}
 
 
 def active_sessions(room="living_room"):
-    return REGISTRY.get_sample_value("plex_dispatcher_room_active_sessions", {"room": room})
+    return active_service().metrics.registry.get_sample_value("plex_dispatcher_room_active_sessions", {"room": room})
 
 
 @pytest.mark.parametrize("name", ["media.play", "media.resume"])
 @pytest.mark.parametrize("media_type", ["track", "photo", None, 42])
-def test_filtered_play_right_after_film_restores_at_once(movies_only, light_calls, name, media_type):
+def test_filtered_play_right_after_film_restores_at_once(movies_only, light_calls, name, media_type, playback):
     event("media.play", "movie", uuid="uuid-living")
     event(name, media_type, uuid="uuid-living")
     assert light_calls == RESTORED
-    assert dispatcher._active_clients == {"living_room": {}}
-    assert dispatcher._pending_rooms == set()
+    assert playback.active_clients == {"living_room": {}}
+    assert playback.pending_rooms == set()
     assert active_sessions() == 0
 
 
@@ -109,14 +107,14 @@ def test_title_only_filtered_play_right_after_film_restores(movies_only, light_c
     assert light_calls == RESTORED
 
 
-def test_later_events_after_the_switch_dispatch_nothing_more(movies_only, light_calls, monkeypatch):
+def test_later_events_after_the_switch_dispatch_nothing_more(movies_only, light_calls, monkeypatch, playback):
     event("media.play", "movie", uuid="uuid-living")
     event("media.play", "track", uuid="uuid-living")
     event("media.stop", "movie", uuid="uuid-living")  # a stop that arrives after the next item's play
     event("media.play", "track", uuid="uuid-living")
     event("media.stop", "track", uuid="uuid-living")
-    monkeypatch.setattr(dispatcher, "_clock", lambda: float("inf"))
-    dispatcher.expire_idle_clients()
+    monkeypatch.setattr(playback, "clock", lambda: float("inf"))
+    playback.expire_idle_clients()
     drain()
     assert light_calls == RESTORED
 
@@ -128,34 +126,34 @@ def test_film_after_the_switch_dims_again(movies_only, light_calls):
     assert active_sessions() == 1
 
 
-def test_unlisted_player_switching_to_music_ends_its_own_film(movies_only, light_calls):
+def test_unlisted_player_switching_to_music_ends_its_own_film(movies_only, light_calls, playback):
     event("media.play", "movie", uuid="synthetic-unlisted")
     event("media.play", "track", uuid="synthetic-unlisted")
     assert light_calls == RESTORED
-    assert dispatcher._activating_uuids == {}
+    assert playback.activating_uuids == {}
 
 
 @pytest.mark.parametrize("film_uuid", ["uuid-living", "synthetic-unlisted"])
-def test_filtered_play_from_another_device_sharing_the_title_changes_nothing(movies_only, light_calls, film_uuid):
+def test_filtered_play_from_another_device_sharing_the_title_changes_nothing(movies_only, light_calls, film_uuid, playback):
     event("media.play", "movie", uuid=film_uuid)
-    before = dict(dispatcher._active_clients["living_room"])
+    before = dict(playback.active_clients["living_room"])
     event("media.play", "track", uuid="synthetic-other-device")
     assert light_calls == DIMMED
-    assert dispatcher._active_clients["living_room"] == before
+    assert playback.active_clients["living_room"] == before
     assert active_sessions() == 1
     event("media.stop", "movie", uuid=film_uuid)
     assert light_calls == RESTORED
 
 
-def test_filtered_play_with_records_but_no_active_entry_dispatches_nothing(movies_only, light_calls):
+def test_filtered_play_with_records_but_no_active_entry_dispatches_nothing(movies_only, light_calls, playback):
     # After a restart the dim's records survive with no player state: only a stop or pause restores then.
-    dispatcher._pending_rooms.add("living_room")
+    playback.pending_rooms.add("living_room")
     event("media.play", "track", uuid="uuid-living")
     assert light_calls == []
-    assert dispatcher._active_clients == {}
-    assert dispatcher._pending_rooms == {"living_room"}
+    assert playback.active_clients == {}
+    assert playback.pending_rooms == {"living_room"}
     event("media.stop", "track", uuid="uuid-living")
-    assert dispatcher._pending_rooms == set()
+    assert playback.pending_rooms == set()
 
 
 def test_room_without_the_option_stays_dimmed_from_film_to_music(movies_only, light_calls):
@@ -211,17 +209,17 @@ def test_null_means_unset(registry, rooms_file, light_calls):
     assert light_calls == [("dim", ["AA:BB"])]
 
 
-def test_ignored_event_is_stored_counted_and_audited(client, movies_only, light_calls):
+def test_ignored_event_is_stored_counted_and_audited(client, movies_only, light_calls, playback):
     labels = {"event": "media.play", "player": "Living Room TV", "account": "known"}
-    before = REGISTRY.get_sample_value("plex_webhook_events_total", labels) or 0
+    before = active_service().metrics.registry.get_sample_value("plex_webhook_events_total", labels) or 0
     body = payload("media.play")
     body["Metadata"]["type"] = "track"
     assert post(client, body).status_code == 200
     drain()
     assert light_calls == []
-    assert dispatcher._active_clients == {}
+    assert playback.active_clients == {}
     assert client.conn.execute("SELECT event, media_type FROM events").fetchall() == [("media.play", "track")]
-    assert REGISTRY.get_sample_value("plex_webhook_events_total", labels) == before + 1
+    assert active_service().metrics.registry.get_sample_value("plex_webhook_events_total", labels) == before + 1
     receipt = [r for r in rows(client) if r["action"] == "webhook.receipt"][-1]
     assert (receipt["outcome"], receipt["reason_code"]) == ("received", "accepted")
     assert not [r for r in rows(client) if r["action"].startswith("light.")]

@@ -7,9 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 SCRIPT = """
-import app.db, app.rooms
-print(app.db.DB_PATH.as_posix())
-print(app.rooms.CONFIG_PATH.as_posix())
+from app.settings import Settings
+settings = Settings.from_env()
+print(settings.db_path.as_posix())
+print(settings.rooms_config_path.as_posix())
 """
 
 

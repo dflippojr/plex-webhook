@@ -1,14 +1,12 @@
 """HTTP stays responsive on one application loop while synthetic light work is held."""
 import json
-import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
-from prometheus_client import REGISTRY
-
-from app import db, lights, main
+from app import lights
+from app.main import create_app
 from conftest import accepted_result, drain
 
 ROOM = "den"
@@ -16,27 +14,14 @@ CLIENT_UUID = "client-1"
 
 
 @pytest.fixture
-def fake_room(monkeypatch, tmp_path, registry, rooms_file, light_calls):
+def fake_room(rooms_file, light_calls):
     rooms_file.write_text("""
 rooms:
   den:
     plex_clients: [{title: Living Room TV, uuid: client-1}]
     lights: [{brand: govee, id: synthetic-light}]
 """, encoding="utf-8")
-    registry.reload()
-    path = tmp_path / "events.db"
-    # The HTTP loop and the light worker own separate connections to this database.
-    conn = sqlite3.connect(path, check_same_thread=False)
-    try:
-        conn.executescript(db.SCHEMA)
-        monkeypatch.setattr(db, "DB_PATH", path)
-        monkeypatch.setattr(main, "db_conn", conn)
-        yield
-    finally:
-        try:
-            drain()
-        finally:
-            conn.close()
+    # The HTTP loop and the light worker own separate connections to the service's database.
 
 
 def post_event(client, event):
@@ -44,11 +29,12 @@ def post_event(client, event):
     return client.post("/webhook", data={"payload": json.dumps(payload)})
 
 
-def completed(action):
-    return REGISTRY.get_sample_value("plex_dispatcher_actions_total", {"room": ROOM, "action": action}) or 0
+def completed(client, action):
+    registry = client.app.state.service.metrics.registry
+    return registry.get_sample_value("plex_dispatcher_actions_total", {"room": ROOM, "action": action}) or 0
 
 
-def test_running_dim_keeps_http_responsive_and_restores_in_order(fake_room, monkeypatch):
+def test_running_dim_keeps_http_responsive_and_restores_in_order(fake_room, settings, monkeypatch):
     started, release = threading.Event(), threading.Event()
     applied = []
 
@@ -60,10 +46,10 @@ def test_running_dim_keeps_http_responsive_and_restores_in_order(fake_room, monk
         return [accepted_result(light) for light in room_lights]
 
     monkeypatch.setattr(lights, "apply_action", held_dim)
-    before = {action: completed(action) for action in ("dim", "restore")}
     # Every request shares this portal and application loop. Helper futures let a
     # synchronous-dispatch regression time out here and still release the backend.
-    with TestClient(main.app) as client, ThreadPoolExecutor(max_workers=2) as requests:
+    with TestClient(create_app(settings)) as client, ThreadPoolExecutor(max_workers=2) as requests:
+        before = {action: completed(client, action) for action in ("dim", "restore")}
         pending = []
 
         def request(fn, *args):
@@ -94,14 +80,15 @@ def test_running_dim_keeps_http_responsive_and_restores_in_order(fake_room, monk
             assert stop.json() == {"status": "received", "event": "media.stop"}
             assert not release.is_set()
             assert applied == []
-            assert {action: completed(action) for action in before} == before
+            assert {action: completed(client, action) for action in before} == before
         finally:
             release.set()
             try:
                 for future in pending:
                     future.result(timeout=30)
             finally:
-                drain()
+                drain(client.app.state.service)
+        after = {action: completed(client, action) - before[action] for action in before}
 
     assert applied == ["dim", "restore"]
-    assert {action: completed(action) - before[action] for action in before} == {"dim": 1, "restore": 1}
+    assert after == {"dim": 1, "restore": 1}

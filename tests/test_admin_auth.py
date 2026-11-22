@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from prometheus_client import generate_latest
 
 from conftest import ADMIN_TOKEN, drain, payload, rows
 
@@ -87,33 +86,29 @@ def test_webhook_stays_unauthenticated_and_plex_server_actor(anon, light_calls):
 
 
 def test_denial_audit_is_bounded_and_counted(anon, monkeypatch):
-    import app.main as main
-    monkeypatch.setattr(main, "DENIAL_AUDIT_LIMIT", 3)
-    monkeypatch.setitem(main._denial_window, "start", 0.0)
-    monkeypatch.setitem(main._denial_window, "count", 0)
+    from app import service
+    monkeypatch.setattr(service, "DENIAL_AUDIT_LIMIT", 3)  # each app's service starts a fresh window
     for _ in range(10):
         anon.get("/rooms", headers={"Authorization": f"Bearer {SENTINEL}"})
     assert len([r for r in rows(anon) if r["outcome"] == "denied"]) == 3
-    metrics = generate_latest().decode()
+    metrics = anon.service.metrics.render().decode()
     assert 'plex_webhook_admin_denials_total{reason="invalid_credential"}' in metrics
     assert SENTINEL not in metrics and ADMIN_TOKEN not in metrics
 
 
-def test_denial_audit_window_resets_after_a_minute(monkeypatch):
+def test_denial_audit_window_resets_after_a_minute(monkeypatch, service):
     # Pins the clock so the reset runs whatever the host's uptime is; a runner
     # booted under a minute ago never reaches the reset otherwise.
     import types
-    import app.main as main
+    from app import service as service_module
     clock = {"now": 1000.0}
-    monkeypatch.setattr(main, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
-    monkeypatch.setattr(main, "DENIAL_AUDIT_LIMIT", 2)
-    monkeypatch.setitem(main._denial_window, "start", 0.0)
-    monkeypatch.setitem(main._denial_window, "count", 0)
-    assert [main._denial_audit_allowed() for _ in range(3)] == [True, True, False]
-    clock["now"] += main.DENIAL_AUDIT_WINDOW - 1
-    assert main._denial_audit_allowed() is False
+    monkeypatch.setattr(service_module, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(service_module, "DENIAL_AUDIT_LIMIT", 2)
+    assert [service.denial_audit_allowed() for _ in range(3)] == [True, True, False]
+    clock["now"] += service_module.DENIAL_AUDIT_WINDOW - 1
+    assert service.denial_audit_allowed() is False
     clock["now"] += 1
-    assert main._denial_audit_allowed() is True
+    assert service.denial_audit_allowed() is True
 
 
 def test_credentials_never_logged(anon, caplog):

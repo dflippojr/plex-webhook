@@ -8,8 +8,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from app.settings import Settings
+from app.action_queue import ActionQueue
 from app import audit, db, dispatcher, lights
-from conftest import drain, payload
+from conftest import active_service, drain, payload
 from test_brightness import FakeController, on
 
 ROOMS = ("a", "b", "c")
@@ -47,7 +49,7 @@ def trail(tmp_path):
 
 
 @pytest.fixture
-def blocked_worker():
+def blocked_worker(playback):
     """Hold the worker busy so later submissions stay queued until released."""
     release, started = threading.Event(), threading.Event()
 
@@ -55,7 +57,7 @@ def blocked_worker():
         started.set()
         release.wait(timeout=10)
 
-    dispatcher._action_executor.submit(block)
+    playback.queue.submit(block)
     assert started.wait(timeout=5)
     yield release
     release.set()
@@ -63,28 +65,29 @@ def blocked_worker():
 
 
 def event(room, name, context=None):
-    dispatcher.handle_event(payload(name, room), context)
+    active_service().playback.handle_event(payload(name, room), context)
 
 
 def queued_keys():
-    with dispatcher._action_executor._ready:
-        return [entry[0] for entry in dispatcher._action_executor._entries]
+    queue = active_service().queue
+    with queue._ready:
+        return [entry[0] for entry in queue._entries]
 
 
 def unbounded(monkeypatch):
     """Restore the default limit so drain()'s own submission cannot push out a queued action."""
-    monkeypatch.setattr(dispatcher._action_executor, "limit", dispatcher.ACTION_QUEUE_LIMIT)
+    monkeypatch.setattr(active_service().playback.queue, "limit", Settings().dispatch_queue_limit)
 
 
 def dropped(room, reason):
-    return dispatcher.DISPATCH_DROPPED_TOTAL.labels(room=room, reason=reason)._value.get()
+    return active_service().metrics.dispatch_dropped.labels(room=room, reason=reason)._value.get()
 
 
 # --- the queue on its own ---------------------------------------------------------
 
 
 def test_same_key_keeps_only_the_latest_at_the_back():
-    queue = dispatcher.ActionQueue(limit=8, name="test-queue")
+    queue = ActionQueue(limit=8, name="test-queue")
     release, started = threading.Event(), threading.Event()
     ran, drops = [], []
 
@@ -111,7 +114,7 @@ def test_same_key_keeps_only_the_latest_at_the_back():
 
 
 def test_unkeyed_submissions_never_coalesce():
-    queue = dispatcher.ActionQueue(limit=8, name="test-queue")
+    queue = ActionQueue(limit=8, name="test-queue")
     ran = []
     futures = [queue.submit(ran.append, n) for n in range(3)]
     for future in futures:
@@ -120,7 +123,7 @@ def test_unkeyed_submissions_never_coalesce():
 
 
 def test_overflow_drops_the_oldest_queued_entry():
-    queue = dispatcher.ActionQueue(limit=2, name="test-queue")
+    queue = ActionQueue(limit=2, name="test-queue")
     release, started = threading.Event(), threading.Event()
     ran, drops = [], []
     queue.submit(lambda: (started.set(), release.wait(10)))
@@ -136,14 +139,14 @@ def test_overflow_drops_the_oldest_queued_entry():
 
 
 def test_failing_action_does_not_stop_the_worker():
-    queue = dispatcher.ActionQueue(limit=4, name="test-queue")
+    queue = ActionQueue(limit=4, name="test-queue")
     failing = queue.submit(lambda: 1 / 0)
     assert queue.submit(lambda: "ok").result(timeout=5) == "ok"
     assert isinstance(failing.exception(timeout=5), ZeroDivisionError)
 
 
-def test_drop_callbacks_none_and_raising_do_not_stop_submit(blocked_worker, monkeypatch, caplog):
-    queue = dispatcher._action_executor
+def test_drop_callbacks_none_and_raising_do_not_stop_submit(blocked_worker, monkeypatch, caplog, playback):
+    queue = playback.queue
     ran, drops = [], []
 
     def raising(reason):
@@ -166,10 +169,10 @@ def test_drop_callbacks_none_and_raising_do_not_stop_submit(blocked_worker, monk
     assert ran == ["third"]
 
 
-def test_cancelled_queued_entry_is_skipped(blocked_worker):
+def test_cancelled_queued_entry_is_skipped(blocked_worker, playback):
     ran = []
-    cancelled = dispatcher._action_executor.submit(ran.append, "cancelled")
-    later = dispatcher._action_executor.submit(ran.append, "later")
+    cancelled = playback.queue.submit(ran.append, "cancelled")
+    later = playback.queue.submit(ran.append, "later")
     assert cancelled.cancel()
     blocked_worker.set()
     later.result(timeout=5)
@@ -197,7 +200,7 @@ def test_alternating_edges_leave_one_pending_action_and_the_last_state(world, tr
     assert dropped("a", "superseded") - before == 2 * (len(edges) - 1)
 
 
-def test_coalesced_restore_after_an_applied_dim_restores(world, trail):
+def test_coalesced_restore_after_an_applied_dim_restores(world, trail, playback, restore_records):
     event("a", "media.play", trail.context)
     drain()
     release, started = threading.Event(), threading.Event()
@@ -206,7 +209,7 @@ def test_coalesced_restore_after_an_applied_dim_restores(world, trail):
         started.set()
         assert release.wait(timeout=30)
 
-    blocker = dispatcher._action_executor.submit(block)
+    blocker = playback.queue.submit(block)
     try:
         assert started.wait(timeout=5)
         for name in ["media.stop", "media.play", "media.stop"]:
@@ -218,7 +221,7 @@ def test_coalesced_restore_after_an_applied_dim_restores(world, trail):
         finally:
             drain()
     assert world.commands == [("dim", "a", 20), ("restore", "a", 80)]
-    assert db.rooms_with_restore_records() == set()
+    assert restore_records.rooms_with_restore_records() == set()
 
 
 def test_different_rooms_do_not_coalesce(world, blocked_worker):
@@ -230,8 +233,8 @@ def test_different_rooms_do_not_coalesce(world, blocked_worker):
     assert sorted(world.commands) == [("dim", "a", 20), ("dim", "c", 20)]
 
 
-def test_overflow_drops_oldest_counts_and_logs_once(world, trail, blocked_worker, monkeypatch, caplog):
-    monkeypatch.setattr(dispatcher._action_executor, "limit", 2)
+def test_overflow_drops_oldest_counts_and_logs_once(world, trail, blocked_worker, monkeypatch, caplog, playback):
+    monkeypatch.setattr(playback.queue, "limit", 2)
     before = dropped("a", "queue_overflow")
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
         event("a", "media.play", trail.context)  # room + automation entry: the queue is full
@@ -246,8 +249,8 @@ def test_overflow_drops_oldest_counts_and_logs_once(world, trail, blocked_worker
     assert world.commands == [("dim", "c", 20)]
 
 
-def test_audit_records_match_the_actions_applied(world, trail, blocked_worker, monkeypatch):
-    monkeypatch.setattr(dispatcher._action_executor, "limit", 4)
+def test_audit_records_match_the_actions_applied(world, trail, blocked_worker, monkeypatch, playback):
+    monkeypatch.setattr(playback.queue, "limit", 4)
     event("a", "media.play", trail.context)
     event("a", "media.stop", trail.context)   # supersedes a's dim
     event("b", "media.play", trail.context)   # fills the queue
@@ -279,17 +282,26 @@ def test_audit_records_match_the_actions_applied(world, trail, blocked_worker, m
     assert all(r["correlation"] == trail.context.correlation for r in stored)
 
 
-def test_queue_limit_comes_from_the_environment(monkeypatch):
-    monkeypatch.setenv("DISPATCH_QUEUE_LIMIT", "5")
-    assert dispatcher._env_int("DISPATCH_QUEUE_LIMIT", 32) == 5
+def test_queue_limit_comes_from_the_environment():
+    assert Settings.from_env({"DISPATCH_QUEUE_LIMIT": "5"}).dispatch_queue_limit == 5
     for bad in ("0", "-1", "many"):
-        monkeypatch.setenv("DISPATCH_QUEUE_LIMIT", bad)
-        assert dispatcher._env_int("DISPATCH_QUEUE_LIMIT", 32) == 32
+        assert Settings.from_env({"DISPATCH_QUEUE_LIMIT": bad}).dispatch_queue_limit == 32
 
 
-def test_env_int_is_one_function_shared_by_main_and_dispatcher():
-    import app.main as main
-    assert main._env_int is dispatcher._env_int
+def test_every_integer_setting_is_read_by_the_one_env_int(monkeypatch):
+    """One parser for every integer setting, so a bad value falls back to the default the same way."""
+    from app import settings
+
+    calls = []
+    monkeypatch.setattr(settings, "env_int", lambda environ, name, default: calls.append(name) or default)
+    Settings.from_env({})
+    assert sorted(calls) == ["DISPATCH_QUEUE_LIMIT", "RAW_PAYLOAD_MAX_BYTES", "WEBHOOK_MAX_BODY_BYTES"]
+
+
+def test_the_service_queue_uses_the_configured_limit(make_service, settings):
+    import dataclasses
+
+    assert make_service(dataclasses.replace(settings, dispatch_queue_limit=5)).queue.limit == 5
 
 
 @pytest.mark.parametrize("reason", ["superseded", "queue_overflow", "own_playback_active", "owned_by_newer_source"])

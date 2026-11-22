@@ -11,9 +11,8 @@ import uuid
 
 import pytest
 import requests
-from prometheus_client import REGISTRY
 
-from app import audit, audit_cli, dispatcher, lights
+from app import audit, audit_cli, lights
 from conftest import drain, migrated, payload, post, records, rows
 
 REAL_APPLY_ACTION = lights.apply_action
@@ -258,7 +257,7 @@ def test_dispatcher_error_summary_and_metric_semantics(client, real_lights, monk
         raise RuntimeError(SENTINEL)
 
     def completed(action):
-        return REGISTRY.get_sample_value(
+        return client.service.metrics.registry.get_sample_value(
             "plex_dispatcher_actions_total", {"room": "living_room", "action": action}) or 0
 
     def send(event):

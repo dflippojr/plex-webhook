@@ -5,11 +5,11 @@ import threading
 
 import pytest
 import yaml
-from prometheus_client import REGISTRY
 
 import app.main as main
-from app import db, dispatcher, lights
-from conftest import drain, rows
+from app.settings import Settings
+from app import dispatcher, lights
+from conftest import active_service, drain, rows
 
 REAL_READ_STATE, REAL_PREPARE = lights.read_state, lights.prepare
 ROOM = "den"
@@ -104,13 +104,13 @@ def test_unknown_transport_or_values_from_a_controller_are_not_echoed(den, monke
     assert read(entry) == {"ok": True, "on": None, "brightness_percent": None, "transport": "none"}
 
 
-def test_check_is_read_only(den, light_calls):
-    db.put_restore_record(ROOM, "g-lan", False, 70, 20)
-    dispatcher._active_clients["hall"] = {"player": 9e18}
-    before = (db.get_restore_record(ROOM, "g-lan"), db.rooms_with_restore_records(), json.dumps(dispatcher._active_clients))
+def test_check_is_read_only(den, light_calls, playback, restore_records):
+    restore_records.put_restore_record(ROOM, "g-lan", False, 70, 20)
+    playback.active_clients["hall"] = {"player": 9e18}
+    before = (restore_records.get_restore_record(ROOM, "g-lan"), restore_records.rooms_with_restore_records(), json.dumps(playback.active_clients))
     lights_ = den.get(PATH).json()["lights"]
     assert [entry["restore_record"] for entry in lights_] == [True, False, False, False, False]
-    after = (db.get_restore_record(ROOM, "g-lan"), db.rooms_with_restore_records(), json.dumps(dispatcher._active_clients))
+    after = (restore_records.get_restore_record(ROOM, "g-lan"), restore_records.rooms_with_restore_records(), json.dumps(playback.active_clients))
     assert after == before and light_calls == []
 
 
@@ -138,10 +138,11 @@ def test_unknown_room_is_404_and_audited_without_the_key(den):
 ])
 def test_denied_without_a_valid_token(den, headers, status, code):
     den.headers.pop("Authorization")
-    counter = REGISTRY.get_sample_value("plex_webhook_admin_denials_total", {"reason": code})
+    samples = den.service.metrics.registry
+    counter = samples.get_sample_value("plex_webhook_admin_denials_total", {"reason": code})
     response = den.get(PATH, headers=headers)
     assert response.status_code == status and response.json() == {"detail": "Admin credential required"}
-    assert REGISTRY.get_sample_value("plex_webhook_admin_denials_total", {"reason": code}) == (counter or 0) + 1
+    assert samples.get_sample_value("plex_webhook_admin_denials_total", {"reason": code}) == (counter or 0) + 1
     [record] = check_records(den)
     assert (record["outcome"], record["reason_code"], record["actor_id"]) == ("denied", code, None)
 
@@ -152,10 +153,11 @@ def test_unset_or_weak_token_is_503(den, monkeypatch, token):
         monkeypatch.delenv("ADMIN_API_TOKEN")
     else:
         monkeypatch.setenv("ADMIN_API_TOKEN", token)
-    counter = REGISTRY.get_sample_value("plex_webhook_admin_denials_total", {"reason": "auth_unconfigured"})
+    samples = den.service.metrics.registry
+    counter = samples.get_sample_value("plex_webhook_admin_denials_total", {"reason": "auth_unconfigured"})
     response = den.get(PATH)
     assert response.status_code == 503 and response.json() == {"detail": "Admin authentication unavailable"}
-    assert REGISTRY.get_sample_value("plex_webhook_admin_denials_total", {"reason": "auth_unconfigured"}) == (counter or 0) + 1
+    assert samples.get_sample_value("plex_webhook_admin_denials_total", {"reason": "auth_unconfigured"}) == (counter or 0) + 1
     [record] = check_records(den)
     assert (record["outcome"], record["reason_code"]) == ("denied", "auth_unconfigured")
 
@@ -164,14 +166,14 @@ def test_unset_or_weak_token_is_503(den, monkeypatch, token):
 
 
 @pytest.fixture
-def blocked_worker():
+def blocked_worker(playback):
     release, started = threading.Event(), threading.Event()
 
     def block():
         started.set()
         release.wait(timeout=10)
 
-    dispatcher._action_executor.submit(block)
+    playback.queue.submit(block)
     assert started.wait(timeout=5)
     yield release
     release.set()
@@ -179,8 +181,9 @@ def blocked_worker():
 
 
 def queued_keys():
-    with dispatcher._action_executor._ready:
-        return [entry[0] for entry in dispatcher._action_executor._entries]
+    queue = active_service().queue
+    with queue._ready:
+        return [entry[0] for entry in queue._entries]
 
 
 def wait_for(condition):
@@ -191,7 +194,7 @@ def wait_for(condition):
     raise AssertionError("condition never held")
 
 
-def test_check_runs_on_the_worker_after_an_already_queued_action(den, monkeypatch, blocked_worker):
+def test_check_runs_on_the_worker_after_an_already_queued_action(den, monkeypatch, blocked_worker, playback):
     log = []
     real = lights._controllers["govee"].read_state
 
@@ -200,7 +203,7 @@ def test_check_runs_on_the_worker_after_an_already_queued_action(den, monkeypatc
         return real(light, timeout)
 
     monkeypatch.setattr(lights._controllers["govee"], "read_state", recording_read)
-    dispatcher._action_executor.submit(lambda: log.append(("queued action", threading.current_thread().name)),
+    playback.queue.submit(lambda: log.append(("queued action", threading.current_thread().name)),
                                        key=("room", ROOM))
     responses = []
     request = threading.Thread(target=lambda: responses.append(den.get(PATH)))
@@ -240,14 +243,14 @@ def test_timed_out_check_that_never_started_is_skipped(den, monkeypatch, blocked
     assert reads == []
 
 
-def test_full_queue_drops_the_check_not_a_queued_action(den, monkeypatch, blocked_worker):
-    monkeypatch.setattr(dispatcher._action_executor, "limit", 1)
+def test_full_queue_drops_the_check_not_a_queued_action(den, monkeypatch, blocked_worker, playback):
+    monkeypatch.setattr(playback.queue, "limit", 1)
     ran = []
-    queued = dispatcher._action_executor.submit(ran.append, "dim", key=("room", "hall"))
+    queued = playback.queue.submit(ran.append, "dim", key=("room", "hall"))
     response = den.get(PATH)
     assert response.status_code == 503 and response.json() == {"detail": "Light check queue full"}
     assert queued_keys() == [("room", "hall")] and not queued.cancelled()
-    monkeypatch.setattr(dispatcher._action_executor, "limit", dispatcher.ACTION_QUEUE_LIMIT)
+    monkeypatch.setattr(playback.queue, "limit", Settings().dispatch_queue_limit)
     blocked_worker.set()
     queued.result(timeout=5)
     assert ran == ["dim"]
@@ -256,26 +259,26 @@ def test_full_queue_drops_the_check_not_a_queued_action(den, monkeypatch, blocke
 
 
 def dropped_actions(reason):
-    return REGISTRY.get_sample_value("plex_dispatcher_actions_dropped_total", {"room": ROOM, "reason": reason}) or 0
+    return active_service().metrics.registry.get_sample_value("plex_dispatcher_actions_dropped_total", {"room": ROOM, "reason": reason}) or 0
 
 
-def test_refused_check_is_not_counted_or_logged_as_a_dropped_action(den, monkeypatch, blocked_worker, caplog):
-    monkeypatch.setattr(dispatcher._action_executor, "limit", 1)
+def test_refused_check_is_not_counted_or_logged_as_a_dropped_action(den, monkeypatch, blocked_worker, caplog, playback):
+    monkeypatch.setattr(playback.queue, "limit", 1)
     before = dropped_actions("queue_overflow")
-    queued = dispatcher._action_executor.submit(lambda: None, key=("room", "hall"))
+    queued = playback.queue.submit(lambda: None, key=("room", "hall"))
     with caplog.at_level(logging.WARNING, logger="plex-webhook"):
-        future = dispatcher.check_lights(ROOM)
+        future = playback.check_lights(ROOM)
     with pytest.raises(dispatcher.CheckDropped):
         future.result(timeout=1)
-    monkeypatch.setattr(dispatcher._action_executor, "limit", dispatcher.ACTION_QUEUE_LIMIT)
+    monkeypatch.setattr(playback.queue, "limit", Settings().dispatch_queue_limit)
     assert not queued.cancelled()
     assert dropped_actions("queue_overflow") == before
     assert not any("dispatch_queue_overflow" in record.getMessage() for record in caplog.records)
 
 
-def test_superseded_check_is_not_counted_as_a_dropped_action(den, blocked_worker):
+def test_superseded_check_is_not_counted_as_a_dropped_action(den, blocked_worker, playback):
     before = dropped_actions("superseded")
-    first, second = dispatcher.check_lights(ROOM), dispatcher.check_lights(ROOM)
+    first, second = playback.check_lights(ROOM), playback.check_lights(ROOM)
     with pytest.raises(dispatcher.CheckDropped):
         first.result(timeout=1)
     assert dropped_actions("superseded") == before
@@ -284,10 +287,10 @@ def test_superseded_check_is_not_counted_as_a_dropped_action(den, blocked_worker
 
 
 def test_check_error_is_500_audited_and_redacted(den, monkeypatch, caplog):
-    def broken(room_key, room_lights):
+    def broken(light, timeout=None):  # the check's read raises instead of reporting a failed reading
         raise RuntimeError("SECRET")
 
-    monkeypatch.setattr(dispatcher, "_check", broken)
+    monkeypatch.setattr(lights, "read_state", broken)
     with caplog.at_level(logging.DEBUG, logger="plex-webhook"):
         response = den.get(PATH)
     assert response.status_code == 500 and response.json() == {"detail": "Light check failed"}
@@ -298,11 +301,11 @@ def test_check_error_is_500_audited_and_redacted(den, monkeypatch, caplog):
     assert "SECRET" not in caplog.text
 
 
-def test_cancelled_check_superseded_by_a_newer_check_stays_cancelled(den, blocked_worker, caplog):
+def test_cancelled_check_superseded_by_a_newer_check_stays_cancelled(den, blocked_worker, caplog, playback):
     with caplog.at_level(logging.ERROR, logger="plex-webhook"):
-        first = dispatcher.check_lights(ROOM)
+        first = playback.check_lights(ROOM)
         assert first.cancel()
-        second = dispatcher.check_lights(ROOM)  # same key, so it supersedes the cancelled check
+        second = playback.check_lights(ROOM)  # same key, so it supersedes the cancelled check
     assert first.cancelled()
     assert not any("dispatcher_action_failed" in r.getMessage() for r in caplog.records)
     blocked_worker.set()
