@@ -32,6 +32,12 @@
 # Optional per Tuya light: `switch_dp` (default 1) and `brightness_dp` (default
 # 3). These data points are unverified on real hardware (issue #4).
 #
+# `brand: hass`: a light behind a Home Assistant hub. Its `id` is the Home
+# Assistant entity id (`light.` then lowercase letters, digits and `_`); the hub
+# URL and token come from HASS_URL/HASS_TOKEN in `.env`. Home Assistant has no
+# brightness-only call, so a dim never switches on a hass light whose state
+# could not be read.
+#
 # Optional `model` field (Govee only): the device SKU (e.g. "H6159"),
 # found in the Govee Home app under the device's settings. Only needed
 # for Govee Cloud API fallback control - not required for LAN control.
@@ -46,7 +52,7 @@ rooms:
       - title: "TODO: e.g. Living Room Apple TV"
         uuid: null
     lights:
-      - brand: govee   # govee | tuya
+      - brand: govee   # govee | tuya | hass
         id: "TODO-living-room-device-id"
         name: "TODO-light-name"
         model: "TODO-govee-sku"   # optional, e.g. "H6159" - cloud fallback only
@@ -62,6 +68,10 @@ rooms:
         name: "TODO-light-name"
         # switch_dp: 1
         # brightness_dp: 3
+      # A light behind a Home Assistant hub:
+      # - brand: hass
+      #   id: "light.todo_bedroom_lamp"   # the Home Assistant entity id
+      #   name: "TODO-light-name"
 
 # Optional: minutes after a play/resume with no pause/stop before the room is
 # restored anyway, when the payload has no media duration (integer 1-10080,

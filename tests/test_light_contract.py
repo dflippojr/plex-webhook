@@ -5,7 +5,7 @@ import pytest
 
 from app import lights
 
-CONTROLLERS = [lights.GoveeController, lights.TuyaController, lights.NullController]
+CONTROLLERS = [lights.GoveeController, lights.TuyaController, lights.HassController, lights.NullController]
 
 
 @pytest.mark.parametrize("cls", CONTROLLERS, ids=lambda cls: cls.__name__)

@@ -12,7 +12,7 @@ import sqlite3
 import pytest
 
 # Device credentials are read where they are used; none may leak in from the host.
-for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "WEBHOOK_TOKEN"):
+for _name in ("GOVEE_API_KEY", "TUYA_ACCESS_ID", "TUYA_ACCESS_KEY", "HASS_URL", "HASS_TOKEN", "WEBHOOK_TOKEN"):
     os.environ.pop(_name, None)
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
@@ -189,8 +189,8 @@ WEBHOOK_TOKEN = "synthetic-webhook-token-0123456789abcdef"
 # Modules whose tests also run with WEBHOOK_TOKEN set: every `client` webhook post
 # then goes to /webhook/<token>, so the same journeys prove the tokened route.
 TOKEN_JOURNEY_MODULES = {
-    "test_admin_auth", "test_audit_http", "test_expiry", "test_govee_http", "test_light_audit", "test_main",
-    "test_media_types", "test_playback_http",
+    "test_admin_auth", "test_audit_http", "test_expiry", "test_govee_http", "test_hass_http", "test_light_audit",
+    "test_main", "test_media_types", "test_playback_http",
 }
 
 

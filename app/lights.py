@@ -1,14 +1,16 @@
 """Light control backends.
 
-Two brands, each with a hybrid local-first / cloud-fallback strategy:
+Two device brands, each with a hybrid local-first / cloud-fallback strategy,
+and one hub:
 
 - Govee: try LAN control (UDP) first, fall back to the Govee Cloud API.
 - Tuya (Gosund-based smart plugs/bulbs): try local control via `tinytuya`
   first, fall back to the Tuya Cloud API.
+- hass: a light behind a Home Assistant hub, through its REST API.
 
 Credentials come from two places (see SETUP.md):
 - Environment variables (`.env`, loaded via docker-compose `env_file`):
-  GOVEE_API_KEY, TUYA_ACCESS_ID, TUYA_ACCESS_KEY.
+  GOVEE_API_KEY, TUYA_ACCESS_ID, TUYA_ACCESS_KEY, HASS_URL, HASS_TOKEN.
 - config/devices.secrets.yaml (gitignored): per-device local_key/ip for
   Tuya devices, and optionally a static ip for Govee devices whose LAN
   discovery isn't reliable. See config/devices.secrets.yaml.example.
@@ -35,12 +37,14 @@ only. Never put keys, tokens, library responses or exception text in them.
 import json
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -78,6 +82,11 @@ GOVEE_CLOUD_API_URL = "https://developer-api.govee.com/v1/devices/control"
 GOVEE_CLOUD_STATE_URL = "https://developer-api.govee.com/v1/devices/state"
 
 SECRETS_PATH = Path("/config/devices.secrets.yaml")
+
+# Home Assistant: only `light.` entity ids that are safe in a URL path (fullmatch: no trailing newline).
+HASS_ENTITY_ID = re.compile(r"light\.[a-z0-9_]+")
+HASS_BRIGHTNESS_MAX = 255
+HASS_COMMAND_TIMEOUT_S = 5
 
 
 # --- secrets loading (cached) --------------------------------------------
@@ -144,6 +153,11 @@ def tuya_raw_to_percent(raw) -> int:
 
 def tuya_percent_to_raw(percent) -> int:
     return max(TUYA_RAW_MIN, min(TUYA_RAW_MAX, int(percent * 10)))
+
+
+def hass_brightness_to_percent(level) -> int:
+    """Home Assistant's 0-255 brightness to a 1-100 percent (an on light is at least 1%)."""
+    return max(1, min(100, round(level * 100 / HASS_BRIGHTNESS_MAX)))
 
 
 def _level(action: str, brightness):
@@ -734,6 +748,113 @@ class TuyaController:
             return Attempt("cloud", "failed", "request_failed", "environment")
 
 
+# --- Home Assistant -------------------------------------------------------------
+
+
+class HassController:
+    """Lights behind a Home Assistant hub, through its REST API (option b of #181).
+
+    The light's ``id`` is a Home Assistant entity id (``light.<name>``). HASS_URL (the
+    hub's base URL) and HASS_TOKEN (a long-lived access token) come from the
+    environment, read on each call like the other brands' keys. The token goes only
+    into the Authorization header: never into a log line, a result, the audit trail
+    or an exception message this module writes. Redirects are not followed, so the
+    header never travels to another address.
+    """
+
+    def apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
+        return _guarded_apply("hass", self._apply, action, light, brightness, turn_on)
+
+    def _apply(self, action: str, light: dict, brightness: int | None = None, turn_on: bool = True) -> LightResult:
+        return _apply_steps("hass", (("hub", self._try_hub),), action, light, brightness, turn_on)
+
+    def read_state(self, light: dict, timeout: float) -> StateReading:
+        """``GET /api/states/<entity_id>``. Never raises."""
+        return _read_steps("hass", (("hub", self._read_hub),), light, timeout)
+
+    @staticmethod
+    def _hub():
+        """(base url, token), or None when either is unset or the url is not an http(s) address."""
+        url, token = os.environ.get("HASS_URL", "").strip(), os.environ.get("HASS_TOKEN", "").strip()
+        if not url or not token:
+            return None
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return None
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.query or parts.fragment:
+            return None
+        return url.rstrip("/"), token
+
+    @staticmethod
+    def _entity_id(light: dict) -> str | None:
+        """The light's id when it is a safe ``light.`` entity id for a URL path, else None."""
+        entity_id = light.get("id")
+        if isinstance(entity_id, str) and HASS_ENTITY_ID.fullmatch(entity_id):
+            return entity_id
+        return None
+
+    def _read_hub(self, light: dict, timeout: float) -> StateReading:
+        hub, entity_id = self._hub(), self._entity_id(light)
+        if hub is None or entity_id is None:
+            return StateReading.failed()
+        import requests
+
+        url, token = hub
+        response = requests.get(f"{url}/api/states/{entity_id}", headers={"Authorization": f"Bearer {token}"},
+                                timeout=timeout, allow_redirects=False)
+        if response.status_code != 200:
+            return StateReading.failed()
+        return self._reading(response.json())
+
+    @staticmethod
+    def _reading(body) -> StateReading:
+        """Map a state object: ``off``, or ``on`` with a 0-255 ``brightness``; anything else is unreadable."""
+        if not isinstance(body, dict):
+            return StateReading.failed()
+        state = body.get("state")
+        if state == "off":
+            return StateReading(True, False, None)
+        if state != "on":
+            return StateReading.failed()  # unavailable, unknown, or not a light state
+        attributes = body.get("attributes")
+        level = attributes.get("brightness") if isinstance(attributes, dict) else None
+        if type(level) is not int or not 0 <= level <= HASS_BRIGHTNESS_MAX:
+            return StateReading.failed()
+        return StateReading(True, True, hass_brightness_to_percent(level))
+
+    def _try_hub(self, light: dict, brightness: int, turn_on: bool = True) -> Attempt:
+        hub = self._hub()
+        if hub is None:
+            logger.info("hass[hub]: HASS_URL/HASS_TOKEN not set or not usable, skipping")
+            return Attempt("hub", "skipped", "missing_credentials")
+        entity_id = self._entity_id(light)
+        if entity_id is None:
+            logger.warning("reason=invalid_entity_id brand=hass operation=apply (expected light.<name>)")
+            return Attempt("hub", "skipped", "invalid_entity_id", "environment")
+        if not turn_on:
+            # light.turn_on would switch an off light on; there is no brightness-only call.
+            return Attempt("hub", "skipped", "brightness_only_unsupported", "environment")
+
+        try:
+            import requests
+
+            url, token = hub
+            response = requests.post(f"{url}/api/services/light/turn_on",
+                                     headers={"Authorization": f"Bearer {token}"},
+                                     json={"entity_id": entity_id, "brightness_pct": brightness},
+                                     timeout=HASS_COMMAND_TIMEOUT_S, allow_redirects=False)
+        except Exception:
+            logger.warning("reason=hub_request_failed brand=hass operation=apply id=%s", entity_id)
+            return Attempt("hub", "failed", "request_failed", "environment")
+        if not 200 <= response.status_code < 300:
+            logger.warning("reason=hub_rejected brand=hass operation=apply id=%s status=%d",
+                           entity_id, response.status_code)
+            return Attempt("hub", "failed", "hub_rejected", "environment")
+        # The hub took the service call; that is not proof the bulb changed.
+        return Attempt("hub", "request_accepted_by_transport", "hub_accepted", "environment", ("turn", "brightness"))
+
+
 # --- dispatch table ---------------------------------------------------------
 
 
@@ -768,6 +889,7 @@ class NullController:
 _controllers: dict[str, LightController] = {
     "govee": GoveeController(),
     "tuya": TuyaController(),
+    "hass": HassController(),
 }
 _null_controller: LightController = NullController()
 

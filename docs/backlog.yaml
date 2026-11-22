@@ -228,3 +228,43 @@ items:
       bounded time and closes the store. The light module's device caches stay module state.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: hass-hub-controller
+    kind: deferred
+    status: done
+    issue: 181
+    title: "Light control: add a Home Assistant hub controller beside Govee and Tuya"
+    body: |
+      From the 2026-11-17 architecture review; the owner chose option (b), routing light
+      control through a hub. Stage 1 of three.
+
+      Built in #181: `HassController` in `app/lights.py`, brand `hass`, reads
+      `GET /api/states/<entity_id>` and sets brightness with the `light/turn_on` service.
+      `HASS_URL` and `HASS_TOKEN` come from the environment only. New fixed vocabulary:
+      transport `hub`, reasons `hub_accepted`, `hub_rejected`, `invalid_entity_id` and
+      `brightness_only_unsupported`, metric brand `hass`. Stage 2 (pointing the live rooms
+      file at hub entities and running the exit test) is the owner's, tracked in #2.
+      Stage 3 is `remove-device-controllers`.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: remove-device-controllers
+    kind: deferred
+    title: "Light control: remove the Govee and Tuya controllers once the hub carries the lights"
+    body: |
+      Stage 3 of #181. Wait until the #2 exit test has passed through the Home Assistant hub
+      (stage 2, an owner step).
+
+      Remove `GoveeController` and `TuyaController` from `app/lights.py`, the
+      `devices.secrets.yaml` handling and its `.example`, the `GOVEE_API_KEY`,
+      `TUYA_ACCESS_ID` and `TUYA_ACCESS_KEY` env keys, the `tinytuya` dependency (regenerate
+      both locks), the Govee/Tuya-only audit vocabulary (`lan`, `local`, `cloud`,
+      `lan_command_sent`, `local_accepted`, `cloud_accepted`, `tuya_rejected` and the like)
+      and their metric brands, and the Govee/Tuya sections of `SETUP.md`. Re-scope or close
+      #3 and #4. Check whether rows already in the audit trail still need the removed values
+      to read and export.
+
+      This deletes tests, so it needs the owner's `gate-change-approved` label. Check the
+      coverage total against `fail_under` in `.coveragerc` first.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
