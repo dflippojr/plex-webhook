@@ -189,8 +189,8 @@ WEBHOOK_TOKEN = "synthetic-webhook-token-0123456789abcdef"
 # Modules whose tests also run with WEBHOOK_TOKEN set: every `client` webhook post
 # then goes to /webhook/<token>, so the same journeys prove the tokened route.
 TOKEN_JOURNEY_MODULES = {
-    "test_admin_auth", "test_audit_http", "test_expiry", "test_govee_http", "test_light_audit", "test_main",
-    "test_media_types", "test_playback_http",
+    "test_admin_auth", "test_audit_http", "test_expiry", "test_govee_http", "test_hass_http", "test_light_audit",
+    "test_main", "test_media_types", "test_playback_http",
 }
 
 

@@ -88,6 +88,35 @@ control starts failing for a device that used to work, re-check its IP
 (the wizard's output, your router's client list, or just re-run the
 wizard) and update `config/devices.secrets.yaml`.
 
+## 3b. Home Assistant hub (`brand: hass`)
+
+A light that Home Assistant already controls can be dimmed through the hub
+instead of the Govee/Tuya transports. In `config/rooms.yaml`, give it
+`brand: hass` and its Home Assistant entity id as `id` (for example
+`light.todo_lamp`: `light.` then lowercase letters, digits and `_` only;
+anything else is skipped as `invalid_entity_id`).
+
+1. In Home Assistant, open your user profile, go to the **Security** tab and
+   under **Long-lived access tokens** choose **Create token**. Copy it once;
+   Home Assistant will not show it again. A dedicated non-admin user for this
+   service limits what the token can do.
+2. In `.env`, set `HASS_URL` to the hub's base URL (`http://` or `https://`,
+   host and port, no query or fragment) and `HASS_TOKEN` to the token.
+3. The container must be able to reach that URL. `localhost` inside the
+   container is the container itself, not the host: use an address the
+   container can resolve and route to. Check from the host with
+   `docker compose exec plex-webhook python -c "import os, requests; print(requests.get(os.environ['HASS_URL'] + '/api/', headers={'Authorization': 'Bearer ' + os.environ['HASS_TOKEN']}, timeout=5).status_code)"`,
+   which prints `200` when the URL and token work.
+
+The token is sent only in the `Authorization` header. It is never logged,
+audited or returned by any route, and redirects are not followed, so it is
+never sent to another address. A non-2xx reply is audited as
+`failed`/`hub_rejected`; a 2xx reply means the hub accepted the call, not
+that the bulb changed. Home Assistant has no call that sets brightness while
+leaving an off light off, so a dim of a hass light whose state could not be
+read sends nothing (`skipped`/`brightness_only_unsupported`). Rotate the token
+by editing `.env` and restarting (step 5).
+
 ## 4. Map rooms and Plex clients
 
 This part is unchanged from the original Phase 3 workflow - see the

@@ -156,12 +156,12 @@ Outcomes are transport evidence, **never observed bulb state**:
 | outcome | meaning |
 | --- | --- |
 | `command_sent` | Govee LAN UDP datagrams were sent; there is no acknowledgement |
-| `request_accepted_by_transport` | cloud HTTP completed, or the local/cloud Tuya reply held no error |
+| `request_accepted_by_transport` | cloud HTTP completed, the local/cloud Tuya reply held no error, or the Home Assistant hub answered 2xx to `light/turn_on` (`hub_accepted`) |
 | `unconfirmed` | a call returned but nothing establishes acceptance (no fallback is attempted) |
-| `failed` | every attempt errored or was explicitly rejected (`tuya_rejected`) |
-| `skipped` | nothing was sent: `light_off`, `manual_change` or `no_record` (decided not to touch the light), or nothing could be tried (`unsupported_brand`, `missing_credentials`, `missing_model`, `no_address`, `library_unavailable`) |
+| `failed` | every attempt errored or was explicitly rejected (`tuya_rejected`, or `hub_rejected` for a non-2xx hub reply) |
+| `skipped` | nothing was sent: `light_off`, `manual_change` or `no_record` (decided not to touch the light), or nothing could be tried (`unsupported_brand`, `missing_credentials`, `missing_model`, `no_address`, `library_unavailable`, `invalid_entity_id` for a hass id outside `light.[a-z0-9_]+`, `brightness_only_unsupported` for a dim of an unread hass light, which Home Assistant cannot do without switching it on) |
 
-`detail` also holds the selected `transport` (`lan`, `local`, `cloud`, `none`), the
+`detail` also holds the selected `transport` (`lan`, `local`, `cloud`, `hub`, `none`), the
 `credential_source` kind (`environment`, `device_config`, `none`, never a value),
 `progress` (`turn`, `brightness` completed steps) and every `attempts` entry, so a local
 failure followed by a cloud fallback is visible. Summary outcomes: `completed_unverified`,

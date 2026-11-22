@@ -12,6 +12,7 @@ Phases 1–3 are built. Open work is tracked as GitHub issues, mirrored from
 - [#189](https://github.com/dflippojr/plex-webhook/issues/189) remove the legacy `events.jsonl` pruning code one release after #183 stopped writing the log
 - prune stored events and audit rows without stopping the service, now that the database runs in WAL mode (backlog `online-retention`, not filed yet)
 - delete the light tolerance code and the test-only functions, after #184 declared the controller contract (backlog `light-controller-cleanup`, not filed yet)
+- remove the Govee and Tuya controllers once the #2 exit test has passed through the Home Assistant hub (#181 stage 3, backlog `remove-device-controllers`, not filed yet)
 
 The next planned steps are those three hardware checks; they need the owner's devices
 and accounts.
@@ -588,8 +589,12 @@ Light control (`app/lights.py`) now has real per-brand controllers:
 - **`TuyaController`** (covers Gosund-based lights): hybrid control via
   the `tinytuya` package — local control (device id + local key + IP)
   first, Tuya Cloud API fallback.
+- **`HassController`** (brand `hass`): a light behind a Home Assistant hub,
+  read with `GET /api/states/<entity_id>` and set with the `light/turn_on`
+  service, using `HASS_URL` and a long-lived `HASS_TOKEN` from the
+  environment. The light's `id` is its entity id (`light.<name>`).
 
-Both controllers catch every failure internally (missing credentials,
+All controllers catch every failure internally (missing credentials,
 unreachable device, network error) and log a warning rather than raising,
 so the dispatcher keeps working with zero devices configured. No real
 credentials exist in this repo — see **[SETUP.md](SETUP.md)** for how to
@@ -609,14 +614,14 @@ counts). Per-light results are in the [audit trail](docs/audit.md#light-actions)
 counted in `plex_dispatcher_light_results_total{room,brand,transport,outcome}`, once per
 `light.result` the trail records, even when the audit write fails:
 
-- `brand`: `govee`, `tuya` or `other` (any other configured brand).
-- `transport`: `lan`, `local`, `cloud` or `none`. A light the dispatcher chose not to touch
+- `brand`: `govee`, `tuya`, `hass` or `other` (any other configured brand).
+- `transport`: `lan`, `local`, `cloud`, `hub` (Home Assistant) or `none`. A light the dispatcher chose not to touch
   (`no_record`, `light_off`, `manual_change`) counts as `transport="none", outcome="skipped"`.
 - `outcome`: `command_sent`, `request_accepted_by_transport`, `unconfirmed`, `failed` or
   `skipped`. Outcomes are transport evidence, **never observed bulb state**:
   `command_sent` means Govee LAN UDP datagrams were sent with no acknowledgement, and
-  `request_accepted_by_transport` means cloud HTTP completed or the local/cloud Tuya reply
-  held no error.
+  `request_accepted_by_transport` means cloud HTTP completed, the local/cloud Tuya reply
+  held no error, or the Home Assistant hub answered 2xx to the `light/turn_on` call.
 
 An action whose backend reported nothing counts no per-light results. Govee lights that
 fall back to the cloud show up as `transport="cloud"` where `lan` was expected.
