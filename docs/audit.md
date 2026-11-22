@@ -137,10 +137,10 @@ the container's server gives in-flight requests 3 seconds (`--timeout-graceful-s
 the Dockerfile `CMD`), then the service stops taking new work and spends at most 5 seconds
 on queued actions, together under Docker's default 10-second stop timeout. Queued actions
 get the first 4 seconds to finish; every action still queued then is dropped as `shutdown`,
-and their summaries are written in the last second (each write waits at most 0.25 seconds
-for the database lock). Actions whose summary would fall past that deadline get none: the
-log line `reason=shutdown_drops_unaudited count=N` records how many, and they read as
-incomplete. An action already running is never interrupted. An automation that yields to its
+and their summaries are written in the last second. Every wait in that cleanup, for the
+service's write lock and for SQLite's, ends by the same deadline. Actions whose summary
+misses it get none: the log line `reason=shutdown_drops_unaudited count=N` records how many,
+and they read as incomplete. An action already running is never interrupted. An automation that yields to its
 target room's own playback is summarized as `skipped/own_playback_active`. A restore trigger's
 explicit `restore` entry that yields to a target owned by another (newer) source is
 summarized as `skipped/owned_by_newer_source`. Queued automation

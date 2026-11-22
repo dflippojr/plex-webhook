@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 
 from app import audit, auth, lights, storage
+from app.deadline import DeadlineExceeded
 from app.action_queue import ActionQueue
 from app.db import RestoreRecords, labeled_event_counts, last_received_at
 from app.dispatcher import AuditContext, PlaybackState
@@ -27,9 +28,10 @@ PLEX_EVENTS = frozenset({
     "device.new", "playback.started",
 })
 
-# How long a graceful stop may spend on queued light actions in all, under Docker's default
-# 10 s stop timeout; the last SHUTDOWN_RECORD_SECONDS of it are kept for the terminal records
-# of the actions it drops (each audit write waits at most 0.25 s for the database lock).
+# How long a graceful stop may spend on queued light actions in all; the last
+# SHUTDOWN_RECORD_SECONDS are kept for the terminal records of the actions it drops. Every wait
+# in that cleanup (WRITE_LOCK, the SQLite busy timeout) ends by the same deadline. With the
+# Dockerfile's 3 s request drain: 3 + 5 = 8 s, under Docker's default 10 s stop timeout.
 SHUTDOWN_DRAIN_SECONDS = 5.0
 SHUTDOWN_RECORD_SECONDS = 1.0
 
@@ -84,7 +86,8 @@ class Service:
         """Stop intake, give queued light actions SHUTDOWN_DRAIN_SECONDS to finish, then close the store.
 
         Actions still queued after the wait are dropped and audited as ``skipped/shutdown`` while
-        the deadline lasts; any left after it are logged by count (``shutdown_drops_unaudited``).
+        the deadline lasts: each summary write waits for locks only until the deadline. Records
+        that miss it are logged by count (``shutdown_drops_unaudited``) and read as incomplete.
         """
         if not self.queue.close(SHUTDOWN_DRAIN_SECONDS, SHUTDOWN_RECORD_SECONDS):
             logger.warning("reason=shutdown_drain_timeout seconds=%s", SHUTDOWN_DRAIN_SECONDS)
@@ -141,6 +144,8 @@ class Service:
         def record(**fields):
             try:
                 audit.append(path, **fields)
+            except DeadlineExceeded:
+                raise  # out of shutdown budget: counted by the queue as unaudited, not as a failure
             except Exception:
                 self.audit_failed()
 

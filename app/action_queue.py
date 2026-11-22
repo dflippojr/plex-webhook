@@ -5,6 +5,8 @@ import time
 from collections import deque
 from concurrent.futures import Future
 
+from app.deadline import DeadlineExceeded
+
 logger = logging.getLogger("plex-webhook")
 
 
@@ -76,9 +78,10 @@ class ActionQueue:
 
         The worker gets ``timeout - drop_budget`` seconds to finish what is queued. Entries still
         queued then are dropped with ``"shutdown"``, and their ``on_drop`` callbacks run on this
-        thread until the overall deadline (with no ``drop_budget``, all of them run, unbounded); a callback already running may overrun it by its own
-        bounded wait. Entries left when the deadline passes are cancelled without their callback
-        and logged by count. An action already running is never interrupted: if it outlasts the
+        thread as ``on_drop(reason, deadline)``: every blocking step in them must end by that
+        deadline (app.deadline) and raise DeadlineExceeded when it cannot. With no
+        ``drop_budget`` they run as ``on_drop(reason)``, unbounded. Entries whose callback is
+        skipped at the deadline or runs out of budget are logged by count. An action already running is never interrupted: if it outlasts the
         deadline it keeps no terminal record unless it finishes before the process exits.
         """
         wait_until = time.monotonic() + timeout - min(drop_budget or 0.0, timeout)
@@ -128,7 +131,9 @@ def _drop(dropped, deadline=None):
             continue
         if callback is not None:
             try:
-                callback(reason)
+                callback(reason) if deadline is None else callback(reason, deadline)
+            except DeadlineExceeded:
+                skipped += 1
             except Exception:
                 logger.error("reason=dispatcher_action_failed operation=drop")
     return skipped

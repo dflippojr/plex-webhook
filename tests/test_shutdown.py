@@ -206,5 +206,6 @@ def test_shutdown_bound_holds_while_the_worker_is_stuck_in_a_restore_record_writ
         locker.rollback()
         locker.close()
     assert elapsed < 1.0 + 0.3, elapsed
+    # room_1's dim summary runs out of budget on WRITE_LOCK; room_1's automation batch, next, is past the deadline.
     unaudited = [r.getMessage() for r in caplog.records if "reason=shutdown_drops_unaudited" in r.getMessage()]
-    assert unaudited == ["reason=shutdown_drops_unaudited count=1"]
+    assert unaudited == ["reason=shutdown_drops_unaudited count=2"]

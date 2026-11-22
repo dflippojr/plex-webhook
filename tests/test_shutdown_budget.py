@@ -27,6 +27,7 @@ BLOCKING_CALLS = {"acquire", "wait", "join", "result", "connect", "_connect"}
 ON_SHUTDOWN_PATH = {
     ("action_queue", "ActionQueue.close", "wait"): "the drain wait ends at timeout - drop_budget",
     ("audit", "append", "WRITE_LOCK"): "acquired with the remaining budget (deadline.acquire)",
+    ("audit", "append", "acquire"): "the deadline.acquire call for WRITE_LOCK",
     ("audit", "append", "connect"): "SQLite busy timeout capped by the remaining budget",
     ("deadline", "acquire", "acquire"): "the budgeted lock helper: waits only for the remaining budget",
 }

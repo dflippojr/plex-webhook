@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app import audit, lights
+from app.deadline import DeadlineExceeded
 from app.rooms import DEFAULT_DIM_PERCENT, DEFAULT_RESTORE_PERCENT
 
 logger = logging.getLogger("plex-webhook")
@@ -73,20 +74,28 @@ def _text(value):
     return value if isinstance(value, str) and value else "unknown"
 
 
-def _record(context, name, outcome, reason, target, action, action_id, **detail):
+def _record(context, name, outcome, reason, target, action, action_id, *, deadline=None, **detail):
+    """Append one light record through ``context``. With a shutdown ``deadline`` the write must end by
+    it; DeadlineExceeded propagates so the queue counts the record as unaudited."""
     if context is None or action not in audit.LIGHT_REQUESTS:
         return
     detail.update(action_id=action_id, request=action, on_behalf_of=context.actor, event_id=context.event_id)
+    fields = dict(action=name, outcome=outcome, reason_code=reason, correlation=context.correlation,
+                  target_id=target if isinstance(target, str) and target else None, detail=detail)
+    if deadline is not None:
+        fields["deadline"] = deadline
     try:
-        context.record(action=name, outcome=outcome, reason_code=reason, correlation=context.correlation,
-                       target_id=target if isinstance(target, str) and target else None, detail=detail)
+        context.record(**fields)
+    except DeadlineExceeded:
+        raise
     except Exception:
         logger.warning("reason=audit_write_failed")
 
 
-def _summary(context, outcome, reason, target, action, action_id):
+def _summary(context, outcome, reason, target, action, action_id, deadline=None):
     """A terminal record for an action that touched no light."""
-    _record(context, "light.action_summary", outcome, reason, target, action, action_id, counts={})
+    _record(context, "light.action_summary", outcome, reason, target, action, action_id, deadline=deadline,
+            counts={})
 
 
 def _record_queued(context, room_key, action, action_id, room_lights, level):
@@ -263,7 +272,8 @@ class PlaybackState:
         blocked = {room for room in snapshots if self.active_clients.get(room)}
         # Nothing is audited for automations until they run, so a dropped batch leaves no queued record.
         self.queue.submit(self._run_automations, room_key, action, entries, snapshots, blocked, context,
-                          key=("automations", room_key), on_drop=lambda reason: self._dropped(room_key, reason))
+                          key=("automations", room_key),
+                          on_drop=lambda reason, deadline=None: self._dropped(room_key, reason))
 
     def _run_automations(self, source, event, entries, snapshots, blocked, context):
         """Run on the same worker as playback actions; automation actions never emit triggers."""
@@ -314,7 +324,7 @@ class PlaybackState:
                 except BaseException as exc:
                     result.set_exception(exc)
 
-        def on_drop(reason):
+        def on_drop(reason, deadline=None):
             # Not _dropped: no light action was lost, and the caller audits the refusal.
             if result.set_running_or_notify_cancel():
                 result.set_exception(CheckDropped(reason))
@@ -346,10 +356,10 @@ class PlaybackState:
         """
         action_id = audit.correlation_id()
 
-        def on_drop(reason):
+        def on_drop(reason, deadline=None):
             # The terminal record for a queued action that never ran; no light was touched.
             self._dropped(room_key, reason)
-            _summary(audit_context, "skipped", reason, room_key, action, action_id)
+            _summary(audit_context, "skipped", reason, room_key, action, action_id, deadline)
 
         try:
             room_lights = self._lights_snapshot(room_key)
