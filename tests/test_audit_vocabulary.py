@@ -42,6 +42,7 @@ OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
         "received": ["accepted", "server_not_allowed"],
         "rejected": ["invalid_form", "invalid_json", "invalid_payload", "missing_payload"],
+        "denied": ["invalid_token"],
     }),
 }
 

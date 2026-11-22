@@ -46,6 +46,8 @@ OPERATIONS = {
     "webhook.receipt": ("webhook", "plex_server", "webhook", {
         "received": {"accepted", "server_not_allowed"},
         "rejected": {"missing_payload", "invalid_json", "invalid_payload", "invalid_form"},
+        # A missing or wrong WEBHOOK_TOKEN; the caller is recorded as anonymous.
+        "denied": {"invalid_token"},
     }),
     "rooms.reload": ("http", "anonymous", "rooms", {
         "activated": {"loaded"}, "rejected": CONFIG_REJECTIONS, "denied": set(DENIAL_REASONS),
@@ -208,9 +210,11 @@ def append(path, *, action, outcome, reason_code, correlation, changed_fields=No
     never share main.db_conn. Only the operations above are supported in v1.
     """
     source, actor, target, outcomes = OPERATIONS[action]
-    if admin:
-        if outcome == "denied":
+    if outcome == "denied":
+        if admin:
             raise ValueError("Denied callers are never verified")
+        actor = "anonymous"
+    elif admin:
         actor = "admin_token"
     if reason_code not in outcomes[outcome]:
         raise ValueError("Invalid audit result")
