@@ -133,9 +133,14 @@ An action dropped before it started has only the queued record and a `skipped` s
 with no decisions or results: `superseded` when a newer action for the same room replaced
 it, `queue_overflow` when the bounded queue pushed it out, `shutdown` when the service
 stopped before running it. On a graceful stop (SIGTERM, for example a container recreate)
-the service stops taking new work and gives queued actions up to 5 seconds, under Docker's
-default 10-second stop timeout, to finish; every action still queued after that is dropped
-as `shutdown`. An action already running is never interrupted. An automation that yields to its
+the container's server gives in-flight requests 3 seconds (`--timeout-graceful-shutdown` in
+the Dockerfile `CMD`), then the service stops taking new work and spends at most 5 seconds
+on queued actions, together under Docker's default 10-second stop timeout. Queued actions
+get the first 4 seconds to finish; every action still queued then is dropped as `shutdown`,
+and their summaries are written in the last second (each write waits at most 0.25 seconds
+for the database lock). Actions whose summary would fall past that deadline get none: the
+log line `reason=shutdown_drops_unaudited count=N` records how many, and they read as
+incomplete. An action already running is never interrupted. An automation that yields to its
 target room's own playback is summarized as `skipped/own_playback_active`. A restore trigger's
 explicit `restore` entry that yields to a target owned by another (newer) source is
 summarized as `skipped/owned_by_newer_source`. Queued automation

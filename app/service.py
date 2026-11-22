@@ -27,8 +27,11 @@ PLEX_EVENTS = frozenset({
     "device.new", "playback.started",
 })
 
-# How long a graceful stop waits for queued light actions, under Docker's default 10 s stop timeout.
+# How long a graceful stop may spend on queued light actions in all, under Docker's default
+# 10 s stop timeout; the last SHUTDOWN_RECORD_SECONDS of it are kept for the terminal records
+# of the actions it drops (each audit write waits at most 0.25 s for the database lock).
 SHUTDOWN_DRAIN_SECONDS = 5.0
+SHUTDOWN_RECORD_SECONDS = 1.0
 
 # Denied-request audit rows are capped per window so a flood of bad calls cannot
 # grow the trail unbounded; every denial is still counted in the metric.
@@ -48,7 +51,18 @@ class Service:
         self._denial_lock = threading.Lock()
 
     def start(self):
-        """Open the store, load the rooms file and seed the counters; see the module docstring."""
+        """Open the store, load the rooms file and seed the counters; see the module docstring.
+
+        A failure after the store opened stops the service (closing the store) and re-raises.
+        """
+        try:
+            self._start()
+        except BaseException:
+            self.stop()
+            raise
+        return self
+
+    def _start(self):
         settings = self.settings
         if settings.webhook_token_digest is None:
             logger.warning("reason=webhook_token_unset: POST /webhook accepts any caller that can reach the "
@@ -65,14 +79,14 @@ class Service:
                           changed_fields=audit.configuration_changes({}, registry.rooms)
                           if registry.load_outcome == "activated" else {})
         self._seed_counters()
-        return self
 
     def stop(self):
         """Stop intake, give queued light actions SHUTDOWN_DRAIN_SECONDS to finish, then close the store.
 
-        Actions still queued after the wait are dropped and audited as ``skipped/shutdown``.
+        Actions still queued after the wait are dropped and audited as ``skipped/shutdown`` while
+        the deadline lasts; any left after it are logged by count (``shutdown_drops_unaudited``).
         """
-        if not self.queue.close(SHUTDOWN_DRAIN_SECONDS):
+        if not self.queue.close(SHUTDOWN_DRAIN_SECONDS, SHUTDOWN_RECORD_SECONDS):
             logger.warning("reason=shutdown_drain_timeout seconds=%s", SHUTDOWN_DRAIN_SECONDS)
         if self.conn is not None:
             self.conn.close()

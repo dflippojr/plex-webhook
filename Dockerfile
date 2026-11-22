@@ -18,4 +18,6 @@ COPY app/ ./app/
 
 USER app
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# In-flight requests get 3 s after SIGTERM, then the lifespan gets up to 5 s for queued light
+# actions (app.service.SHUTDOWN_DRAIN_SECONDS): together under Docker's default 10 s stop timeout.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "3"]

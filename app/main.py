@@ -68,13 +68,15 @@ def create_app(settings=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        service = Service(settings).start()
-        app.state.service = service
-        sweeper = asyncio.create_task(expire_idle_players(service))
+        service = Service(settings)
+        sweeper = None
         try:
+            app.state.service = service.start()
+            sweeper = asyncio.create_task(expire_idle_players(service))
             yield
         finally:
-            sweeper.cancel()
+            if sweeper is not None:
+                sweeper.cancel()
             service.stop()
 
     app = FastAPI(title="plex-webhook", lifespan=lifespan)
